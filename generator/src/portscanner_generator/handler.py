@@ -9,7 +9,12 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
-from .cancellation import CancellationResult, cancel_older_scanners
+from .cancellation import (
+    CancellationResult,
+    cancel_event_scanner,
+    cancel_older_scanners,
+    cancel_scanners_through_generation,
+)
 from .config import GeneratorConfig
 from .event_reader import RecordRejection, parse_shared_contract, read_target_event
 from .idempotency import (
@@ -199,11 +204,57 @@ def _complete_claim(
 def _cancel(
     services: GeneratorServices,
     event: Any,
+    *,
+    accepted_generation: int | None = None,
+    exclude_names: tuple[str, ...] = (),
 ) -> CancellationResult:
     return cancel_older_scanners(
         services.scanner_client(),
         target_id=event.target.target_id,
-        accepted_generation=event.target.generation,
+        accepted_generation=accepted_generation or event.target.generation,
+        exclude_names=exclude_names,
+    )
+
+
+def _cancel_terminal(
+    services: GeneratorServices,
+    event: Any,
+    *,
+    check: OwnershipCheck | None = None,
+) -> CancellationResult:
+    exact_name = scanner_name(event.event_id)
+    exact_deleted = cancel_event_scanner(
+        services.scanner_client(),
+        event_id=event.event_id,
+    )
+    if check is not None and (
+        check.decision is OwnershipDecision.CANCEL
+        or (check.decision is OwnershipDecision.STALE and check.reason == "policy-or-lifecycle")
+    ):
+        result = cancel_scanners_through_generation(
+            services.scanner_client(),
+            target_id=event.target.target_id,
+            unsafe_generation=event.target.generation,
+            exclude_names=(exact_name,),
+        )
+    else:
+        accepted_generation = event.target.generation
+        if (
+            check is not None
+            and check.decision is OwnershipDecision.STALE
+            and check.current_generation is not None
+            and check.current_generation > accepted_generation
+        ):
+            accepted_generation = check.current_generation
+        result = _cancel(
+            services,
+            event,
+            accepted_generation=accepted_generation,
+            exclude_names=(exact_name,),
+        )
+    return CancellationResult(
+        matched=result.matched,
+        deleted=result.deleted + int(exact_deleted),
     )
 
 
@@ -222,8 +273,11 @@ def process_sqs_record(
     event_hash, trace_hash, opaque_target_hash = _hashes(event)
     current = _event_time(services.clock(), "clock")
     is_removal = _event_type(event) == "target.removed"
+    deadline_at = None if is_removal else _event_time(event.scan.deadline_at, "scan.deadline_at")
     not_after = None if is_removal else _event_time(event.scan.not_after, "scan.not_after")
-    if not_after is not None and current >= not_after:
+    if (deadline_at is not None and current >= deadline_at) or (
+        not_after is not None and current >= not_after
+    ):
         _log(
             logging.INFO,
             "event_rejected",
@@ -309,7 +363,7 @@ def process_sqs_record(
 
     if is_removal:
         try:
-            cancellation = _cancel(services, event)
+            cancellation = _cancel_terminal(services, event, check=check)
             _complete_claim(
                 services,
                 claim,
@@ -335,11 +389,13 @@ def process_sqs_record(
 
     if check.decision is OwnershipDecision.STALE:
         try:
+            cancellation = _cancel_terminal(services, event, check=check)
             _complete_claim(
                 services,
                 claim,
                 state=ClaimState.STALE,
                 check=check,
+                cancelled_count=cancellation.deleted,
             )
         except Exception as error:
             _retry_claim(services, claim, error_code="audit_finalize_failed")
@@ -349,11 +405,17 @@ def process_sqs_record(
                 trace_hash=trace_hash,
                 verdict=check.verdict,
             ) from error
-        return RecordOutcome("stale", event_hash, trace_hash, check.verdict)
+        return RecordOutcome(
+            "stale",
+            event_hash,
+            trace_hash,
+            check.verdict,
+            cancellation.deleted,
+        )
 
     if check.decision is OwnershipDecision.CANCEL:
         try:
-            cancellation = _cancel(services, event)
+            cancellation = _cancel_terminal(services, event, check=check)
             _complete_claim(
                 services,
                 claim,
@@ -430,6 +492,15 @@ def process_sqs_record(
             else ClaimState.CANCELLED
         )
         try:
+            terminal_cancellation = _cancel_terminal(
+                services,
+                event,
+                check=final_check,
+            )
+            cancellation = CancellationResult(
+                matched=max(cancellation.matched, terminal_cancellation.matched),
+                deleted=cancellation.deleted + terminal_cancellation.deleted,
+            )
             _complete_claim(
                 services,
                 claim,
@@ -454,8 +525,19 @@ def process_sqs_record(
         )
 
     check = final_check
-    if not_after is not None and _event_time(services.clock(), "clock") >= not_after:
+    create_time = _event_time(services.clock(), "clock")
+    if (deadline_at is not None and create_time >= deadline_at) or (
+        not_after is not None and create_time >= not_after
+    ):
         try:
+            exact_deleted = cancel_event_scanner(
+                services.scanner_client(),
+                event_id=event.event_id,
+            )
+            cancellation = CancellationResult(
+                matched=cancellation.matched,
+                deleted=cancellation.deleted + int(exact_deleted),
+            )
             _complete_claim(
                 services,
                 claim,

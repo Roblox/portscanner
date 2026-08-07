@@ -698,12 +698,24 @@ resource "aws_lambda_invocation" "migration" {
 
   function_name = aws_lambda_function.this["migrator"].function_name
   input = jsonencode({
-    direction = "up"
+    direction          = "up"
+    migration_checksum = var.migration_checksum
   })
 
   triggers = {
     image_digest       = var.image_digests["migrator"]
     migration_checksum = var.migration_checksum
+  }
+
+  lifecycle {
+    postcondition {
+      condition = try(
+        jsondecode(self.result).direction == "up" &&
+        jsondecode(self.result).migration_checksum == var.migration_checksum,
+        false
+      )
+      error_message = "Migrator response did not verify the exact requested migration_checksum."
+    }
   }
 }
 
@@ -761,7 +773,10 @@ resource "aws_cloudwatch_metric_alarm" "outbox_iterator_age" {
 }
 
 resource "aws_cloudwatch_event_rule" "schedule" {
-  for_each = var.deploy_runtime ? local.schedules : {}
+  for_each = {
+    for name, schedule in local.schedules :
+    name => schedule if var.deploy_runtime
+  }
 
   name                = "${var.name_prefix}-${each.key}-schedule"
   description         = "Conservative ${each.key} schedule"

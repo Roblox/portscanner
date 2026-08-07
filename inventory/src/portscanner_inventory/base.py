@@ -174,6 +174,7 @@ class OwnershipCheck:
     verdict: OwnershipVerdict
     current: Any | None = None
     reason: str | None = None
+    current_generation: int | None = None
 
 
 class SnapshotBackend(Protocol):
@@ -203,6 +204,7 @@ def aws_error_code(error: BaseException) -> str:
 
 _NOT_FOUND_CODES = {
     "InvalidAddress.NotFound",
+    "InvalidAllocationID.NotFound",
     "InvalidAssociationID.NotFound",
     "InvalidGroup.NotFound",
     "InvalidInstanceID.NotFound",
@@ -274,7 +276,16 @@ def partial_batch(
 ) -> dict[str, list[dict[str, str]]]:
     failures: list[dict[str, str]] = []
     for record in records:
-        identifier = str(record.get("messageId") or record.get("eventID") or "")
+        source = str(record.get("eventSource") or record.get("EventSource") or "")
+        if source == "aws:sqs" or (not source and "messageId" in record):
+            identifier = str(record.get("messageId") or "")
+        elif source == "aws:dynamodb" or (not source and "dynamodb" in record):
+            dynamodb = record.get("dynamodb")
+            identifier = (
+                str(dynamodb.get("SequenceNumber") or "") if isinstance(dynamodb, Mapping) else ""
+            )
+        else:
+            identifier = ""
         try:
             process(record)
         except Exception:

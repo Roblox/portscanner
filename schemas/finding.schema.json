@@ -533,7 +533,7 @@
     "FindingSeverity": {
       "description": "Detection-rule severity copied into a finding.",
       "enum": [
-        "info",
+        "informational",
         "low",
         "medium",
         "high",

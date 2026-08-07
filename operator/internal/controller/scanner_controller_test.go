@@ -60,6 +60,7 @@ func TestReconcileCreatesOneDeterministicJob(t *testing.T) {
 func TestReconcileRejectsExpiredBeforeCreation(t *testing.T) {
 	now := time.Date(2026, time.August, 5, 20, 0, 0, 0, time.UTC)
 	scanner := validScanner(now)
+	scanner.Spec.Deadline = metav1.NewTime(now.Add(-2 * time.Second))
 	scanner.Spec.NotAfter = metav1.NewTime(now.Add(-time.Second))
 	reconciler, fakeClient := newTestReconciler(t, now, scanner)
 	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(scanner)}
@@ -80,6 +81,30 @@ func TestReconcileRejectsExpiredBeforeCreation(t *testing.T) {
 	}
 	if updated.Status.Outcome != scanningv1alpha1.OutcomeExpired {
 		t.Fatalf("outcome = %q, want Expired", updated.Status.Outcome)
+	}
+}
+
+func TestReconcileCreatesJobAfterProducerDispatchDeadline(t *testing.T) {
+	now := time.Date(2026, time.August, 5, 20, 0, 0, 0, time.UTC)
+	scanner := validScanner(now)
+	scanner.Spec.Deadline = metav1.NewTime(now.Add(-time.Minute))
+	scanner.Spec.NotAfter = metav1.NewTime(now.Add(10 * time.Minute))
+	reconciler, fakeClient := newTestReconciler(t, now, scanner)
+	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(scanner)}
+	reconcile(t, reconciler, request)
+	reconcile(t, reconciler, request)
+
+	var job batchv1.Job
+	jobKey := types.NamespacedName{Name: deterministicJobName(scanner), Namespace: scanner.Namespace}
+	if err := fakeClient.Get(context.Background(), jobKey, &job); err != nil {
+		t.Fatalf("get Job after dispatch deadline: %v", err)
+	}
+	var updated scanningv1alpha1.Scanner
+	if err := fakeClient.Get(context.Background(), request.NamespacedName, &updated); err != nil {
+		t.Fatalf("get Scanner after dispatch deadline: %v", err)
+	}
+	if isTerminal(updated.Status.Outcome) {
+		t.Fatalf("Scanner became terminal at producer dispatch deadline: %q", updated.Status.Outcome)
 	}
 }
 
@@ -164,6 +189,89 @@ func TestReconcileReportsJobSuccess(t *testing.T) {
 	condition := meta.FindStatusCondition(updated.Status.Conditions, scanningv1alpha1.ConditionComplete)
 	if condition == nil || condition.Status != metav1.ConditionTrue {
 		t.Fatal("successful Scanner has no true Complete condition")
+	}
+}
+
+func TestTerminalScannerRequeuesUntilTTLThenDeletes(t *testing.T) {
+	now := time.Date(2026, time.August, 5, 20, 0, 0, 0, time.UTC)
+	scanner := validScanner(now)
+	scanner.Spec.TTLSecondsAfterFinished = 60
+	reconciler, fakeClient := newTestReconciler(t, now, scanner)
+	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(scanner)}
+	reconcile(t, reconciler, request)
+	reconcile(t, reconciler, request)
+
+	var job batchv1.Job
+	jobKey := types.NamespacedName{Name: deterministicJobName(scanner), Namespace: scanner.Namespace}
+	if err := fakeClient.Get(context.Background(), jobKey, &job); err != nil {
+		t.Fatalf("get Job: %v", err)
+	}
+	job.Status.Conditions = []batchv1.JobCondition{{
+		Type:               batchv1.JobComplete,
+		Status:             corev1.ConditionTrue,
+		LastTransitionTime: metav1.NewTime(now.Add(-30 * time.Second)),
+	}}
+	if err := fakeClient.Status().Update(context.Background(), &job); err != nil {
+		t.Fatalf("update Job status: %v", err)
+	}
+
+	result := reconcileResult(t, reconciler, request)
+	if result.RequeueAfter != 30*time.Second {
+		t.Fatalf("terminal requeueAfter = %s, want 30s", result.RequeueAfter)
+	}
+	var stored scanningv1alpha1.Scanner
+	if err := fakeClient.Get(context.Background(), request.NamespacedName, &stored); err != nil {
+		t.Fatalf("Scanner was deleted before TTL: %v", err)
+	}
+
+	reconciler.Clock = func() time.Time { return now.Add(31 * time.Second) }
+	result = reconcileResult(t, reconciler, request)
+	if !result.Requeue {
+		t.Fatal("expired terminal Scanner deletion did not request finalizer reconciliation")
+	}
+	reconcile(t, reconciler, request)
+	reconcile(t, reconciler, request)
+	if err := fakeClient.Get(context.Background(), request.NamespacedName, &stored); !apierrors.IsNotFound(err) {
+		t.Fatalf("terminal Scanner get error = %v, want NotFound", err)
+	}
+}
+
+func TestCoverageScannerWithZeroTTLIsEventuallyRemoved(t *testing.T) {
+	now := time.Date(2026, time.August, 5, 20, 0, 0, 0, time.UTC)
+	scanner := validScanner(now)
+	scanner.Spec.Reason = scanningv1alpha1.ReasonCoverage
+	scanner.Spec.TTLSecondsAfterFinished = 0
+	reconciler, fakeClient := newTestReconciler(t, now, scanner)
+	request := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(scanner)}
+	reconcile(t, reconciler, request)
+	reconcile(t, reconciler, request)
+
+	var job batchv1.Job
+	jobKey := types.NamespacedName{Name: deterministicJobName(scanner), Namespace: scanner.Namespace}
+	if err := fakeClient.Get(context.Background(), jobKey, &job); err != nil {
+		t.Fatalf("get Job: %v", err)
+	}
+	job.Status.Conditions = []batchv1.JobCondition{{
+		Type:               batchv1.JobComplete,
+		Status:             corev1.ConditionTrue,
+		LastTransitionTime: metav1.NewTime(now),
+	}}
+	if err := fakeClient.Status().Update(context.Background(), &job); err != nil {
+		t.Fatalf("update Job status: %v", err)
+	}
+
+	if result := reconcileResult(t, reconciler, request); !result.Requeue {
+		t.Fatal("zero-TTL terminal Scanner was not queued for immediate deletion")
+	}
+	reconcile(t, reconciler, request)
+	reconcile(t, reconciler, request)
+
+	var stored scanningv1alpha1.Scanner
+	if err := fakeClient.Get(context.Background(), request.NamespacedName, &stored); !apierrors.IsNotFound(err) {
+		t.Fatalf("coverage Scanner get error = %v, want NotFound", err)
+	}
+	if err := fakeClient.Get(context.Background(), jobKey, &job); !apierrors.IsNotFound(err) {
+		t.Fatalf("owned coverage Job get error = %v, want NotFound", err)
 	}
 }
 
@@ -260,7 +368,14 @@ func newTestReconciler(
 
 func reconcile(t *testing.T, reconciler *ScannerReconciler, request ctrl.Request) {
 	t.Helper()
-	if _, err := reconciler.Reconcile(context.Background(), request); err != nil {
+	_ = reconcileResult(t, reconciler, request)
+}
+
+func reconcileResult(t *testing.T, reconciler *ScannerReconciler, request ctrl.Request) ctrl.Result {
+	t.Helper()
+	result, err := reconciler.Reconcile(context.Background(), request)
+	if err != nil {
 		t.Fatalf("Reconcile() error = %v", err)
 	}
+	return result
 }

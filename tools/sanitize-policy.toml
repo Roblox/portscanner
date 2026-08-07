@@ -5,17 +5,24 @@ version = 1
 max_text_bytes = 2097152
 max_binary_bytes = 524288
 
-# These are the only account-shaped fixtures accepted by the publication check.
-synthetic_account_ids = ["000000000000", "123456789012"]
+# Binary files are denied by default. An intentionally distributable binary must be
+# reviewed and listed as an exact repository-relative path plus lowercase SHA-256:
+# { path = "docs/example.png", sha256 = "<64 lowercase hex characters>" }
+binary_allowlist = []
+
+# These are the only account-shaped fixtures accepted in fixture-scoped paths.
+synthetic_account_ids = ["000000000000", "123456789012", "222222222222"]
 
 # Live-looking cloud identifiers are allowed only when both the path and exact value
 # match this fixture policy. New values require explicit review.
 synthetic_fixture_paths = [
+  ".gitleaks.toml",
   "**/tests/**",
   "operator/**/*_test.go",
   "operator/config/samples/**",
   "docs/**",
   "examples/**",
+  "terraform/aws/**/*.tftest.hcl",
   "terraform/aws/examples/**",
   "tools/sanitize-policy.toml",
 ]
@@ -28,24 +35,74 @@ synthetic_aws_resource_ids = [
   "eni-bbbbbbbb",
   "i-0123456789abcdef0",
   "i-bbbbbbbb",
+  "rtb-00000000000000001",
+  "rtb-00000000000000002",
+  "rtb-00000000000000003",
+  "rtb-00000000000000004",
+  "sg-00000000000000001",
+  "sg-00000000000000002",
   "sg-0123456789abcdef0",
   "sg-0fedcba9876543210",
   "sg-11111111",
   "sg-22222222",
+  "sg-deadbeef",
+  "subnet-00000000000000001",
+  "subnet-00000000000000002",
+  "subnet-00000000000000003",
+  "subnet-00000000000000004",
   "subnet-0123456789abcdef0",
   "subnet-0123456789abcdef1",
   "subnet-0123456789abcdef2",
   "subnet-0123456789abcdef3",
+  "vpc-00000000000000001",
+  "vpc-00000000000000002",
   "vpc-0123456789abcdef0",
+  "vpce-00000000000000001",
+  "vpce-00000000000000002",
+  "vpce-00000000000000003",
+  "vpce-00000000000000004",
+  "vpce-00000000000000005",
+  "vpce-00000000000000006",
+  "vpce-00000000000000007",
+  "vpce-00000000000000008",
+  "vpce-00000000000000009",
+  "vpce-0000000000000000a",
+  "vpce-0000000000000000b",
+  "vpce-0000000000000000c",
 ]
 synthetic_aws_arns = [
   "arn:aws:iam::{account_id}:role/collector",
   "arn:aws:iam::000000000000:role/collector",
   "arn:aws:events:us-east-1:123456789012:event-bus/scan-central-central",
+  "arn:aws:events:us-east-1:123456789012:event-bus/test-central",
+  "arn:aws:cloudtrail:us-east-1:123456789012:trail/organization-management",
+  "arn:aws:cloudtrail:us-east-1:123456789012:trail/test-management",
+  "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy",
   "arn:aws:iam::123456789012:role/example-central-collector",
   "arn:aws:iam::123456789012:role/example-member-collector",
   "arn:aws:iam::123456789012:role/example-central-snapshot",
   "arn:aws:iam::123456789012:role/example-central-signals",
+  "arn:aws:iam::123456789012:role/test-generator",
+  "arn:aws:iam::123456789012:role/test-installer",
+  "arn:aws:iam::123456789012:role/test-migrator",
+  "arn:aws:iam::123456789012:role/test-outbox",
+  "arn:aws:iam::123456789012:role/test-parser",
+  "arn:aws:iam::123456789012:role/test-processor",
+  "arn:aws:iam::123456789012:role/test-publisher",
+  "arn:aws:iam::123456789012:role/test-rescan",
+  "arn:aws:iam::123456789012:role/test-scanner",
+  "arn:aws:iam::123456789012:role/test-signals",
+  "arn:aws:iam::123456789012:role/test-snapshot",
+  "arn:aws:iam::123456789012:role/test-target-projector",
+  "arn:aws:sqs:us-east-1:123456789012:test-coverage",
+  "arn:aws:sqs:us-east-1:123456789012:test-priority",
+  "arn:aws:sqs:us-east-1:123456789012:test-result",
+  "arn:aws:sqs:us-east-1:123456789012:test-signal",
+  "arn:aws:sqs:us-east-1:123456789012:test-signal-dlq",
+  "arn:aws:sqs:us-east-1:123456789012:test-target-event",
+  "arn:aws:dynamodb:us-east-1:123456789012:table/test-inventory/stream/2026-08-07T00:00:00.000",
+  "arn:aws:secretsmanager:us-east-1:123456789012:secret:test-application",
+  "arn:aws:secretsmanager:us-east-1:123456789012:secret:test-master",
 ]
 
 documentation_ipv4_networks = [

@@ -79,7 +79,7 @@ scanner:
     bucket: replace-with-results-bucket
     prefix: scan-results
   priority:
-    highThreshold: 500
+    highThreshold: 100
   resources:
     requests:
       cpu: 100m

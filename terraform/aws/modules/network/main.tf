@@ -26,13 +26,19 @@ variable "create_vpc" {
 }
 
 variable "vpc_cidr" {
-  description = "CIDR for a created VPC. Override this to fit the production address plan."
+  description = "Canonical AWS VPC IPv4 CIDR from /16 through /24; four subnet bits are added for the three tiers."
   type        = string
   default     = "10.42.0.0/16"
 
   validation {
-    condition     = can(cidrnetmask(var.vpc_cidr))
-    error_message = "vpc_cidr must be a valid IPv4 CIDR."
+    condition = (
+      can(regex("^(0|[1-9][0-9]{0,2})(\\.(0|[1-9][0-9]{0,2})){3}/([0-9]|[12][0-9]|3[0-2])$", var.vpc_cidr)) &&
+      can(cidrnetmask(var.vpc_cidr)) &&
+      try(cidrhost(var.vpc_cidr, 0) == split("/", var.vpc_cidr)[0], false) &&
+      try(tonumber(split("/", var.vpc_cidr)[1]) >= 16, false) &&
+      try(tonumber(split("/", var.vpc_cidr)[1]) <= 24, false)
+    )
+    error_message = "vpc_cidr must be a canonical AWS-valid IPv4 network from /16 through /24."
   }
 }
 
@@ -53,7 +59,7 @@ variable "availability_zones" {
   default     = null
 
   validation {
-    condition     = var.availability_zones == null || length(var.availability_zones) >= 2
+    condition     = var.availability_zones == null ? true : length(var.availability_zones) >= 2
     error_message = "availability_zones must be null or contain at least two entries."
   }
 }
@@ -98,6 +104,48 @@ variable "existing_isolated_subnet_ids" {
   default     = []
 }
 
+variable "existing_private_subnet_egress_mode" {
+  description = "Required existing-VPC declaration: nat_gateway, transit_gateway, or vpc_endpoints."
+  type        = string
+  default     = null
+
+  validation {
+    condition = var.existing_private_subnet_egress_mode == null ? true : contains(
+      ["nat_gateway", "transit_gateway", "vpc_endpoints"],
+      var.existing_private_subnet_egress_mode
+    )
+    error_message = "existing_private_subnet_egress_mode must be null, nat_gateway, transit_gateway, or vpc_endpoints."
+  }
+}
+
+variable "existing_private_vpc_endpoint_ids" {
+  description = "Existing VPC endpoint IDs keyed by required AWS service when existing_private_subnet_egress_mode is vpc_endpoints."
+  type        = map(string)
+  default     = {}
+
+  validation {
+    condition = alltrue([
+      for endpoint_id in values(var.existing_private_vpc_endpoint_ids) :
+      can(regex("^vpce-[0-9a-f]+$", endpoint_id))
+    ])
+    error_message = "existing_private_vpc_endpoint_ids values must be valid VPC endpoint IDs."
+  }
+}
+
+variable "existing_private_interface_endpoint_security_group_ids" {
+  description = "One attached security group per required interface endpoint, keyed by service. Terraform adds TCP/443 ingress from the application Lambda and EKS workload security groups."
+  type        = map(string)
+  default     = {}
+
+  validation {
+    condition = alltrue([
+      for security_group_id in values(var.existing_private_interface_endpoint_security_group_ids) :
+      can(regex("^sg-[0-9a-f]+$", security_group_id))
+    ])
+    error_message = "existing_private_interface_endpoint_security_group_ids values must be valid security group IDs."
+  }
+}
+
 data "aws_availability_zones" "available" {
   count = var.create_vpc && var.availability_zones == null ? 1 : 0
   state = "available"
@@ -133,6 +181,12 @@ data "aws_route_table" "existing_isolated" {
   subnet_id = each.value
 }
 
+data "aws_vpc_endpoint" "existing_private" {
+  for_each = !var.create_vpc && var.existing_private_subnet_egress_mode == "vpc_endpoints" ? var.existing_private_vpc_endpoint_ids : {}
+
+  id = each.value
+}
+
 locals {
   selected_azs = var.create_vpc ? slice(
     var.availability_zones != null ? var.availability_zones : data.aws_availability_zones.available[0].names,
@@ -149,6 +203,56 @@ locals {
     } : {
     for az, index in local.azs : az => az
   }
+  required_private_endpoint_services = toset([
+    "config",
+    "dynamodb",
+    "ec2",
+    "ecr.api",
+    "ecr.dkr",
+    "eks",
+    "eks-auth",
+    "logs",
+    "s3",
+    "secretsmanager",
+    "sqs",
+    "sts"
+  ])
+  required_gateway_endpoint_services = toset([
+    "dynamodb",
+    "s3"
+  ])
+  required_interface_endpoint_services = setsubtract(
+    local.required_private_endpoint_services,
+    local.required_gateway_endpoint_services
+  )
+  china_endpoint_service_prefixes = {
+    config         = "cn.com.amazonaws"
+    dynamodb       = "com.amazonaws"
+    ec2            = "cn.com.amazonaws"
+    "ecr.api"      = "cn.com.amazonaws"
+    "ecr.dkr"      = "cn.com.amazonaws"
+    eks            = "cn.com.amazonaws"
+    "eks-auth"     = "cn.com.amazonaws"
+    logs           = "com.amazonaws"
+    s3             = "com.amazonaws"
+    secretsmanager = "com.amazonaws"
+    sqs            = "cn.com.amazonaws"
+    sts            = "cn.com.amazonaws"
+  }
+  expected_endpoint_service_names = {
+    for service in local.required_private_endpoint_services :
+    service => "${
+      data.aws_partition.current.partition == "aws-cn" ?
+      local.china_endpoint_service_prefixes[service] :
+      "com.amazonaws"
+    }.${data.aws_region.current.region}.${service}"
+  }
+  existing_private_route_table_ids = toset([
+    for table in values(data.aws_route_table.existing_private) : table.id
+  ])
+  existing_interface_endpoint_security_group_ids = toset(
+    values(var.existing_private_interface_endpoint_security_group_ids)
+  )
 }
 
 resource "terraform_data" "network_validation" {
@@ -166,11 +270,101 @@ resource "terraform_data" "network_validation" {
     }
 
     precondition {
+      condition = var.create_vpc || try(
+        data.aws_vpc.existing[0].enable_dns_support &&
+        data.aws_vpc.existing[0].enable_dns_hostnames,
+        false
+      )
+      error_message = "Existing VPCs must enable DNS support and DNS hostnames for AWS service and private EKS endpoint resolution."
+    }
+
+    precondition {
       condition = var.create_vpc || (
         length(var.existing_private_subnet_ids) >= 2 &&
         length(var.existing_isolated_subnet_ids) >= 2
       )
       error_message = "Existing mode requires at least two private and two isolated subnets."
+    }
+
+    precondition {
+      condition     = var.create_vpc || var.existing_private_subnet_egress_mode != null
+      error_message = "Existing mode requires existing_private_subnet_egress_mode to declare NAT gateway, transit gateway, or verified VPC endpoint egress."
+    }
+
+    precondition {
+      condition = (
+        var.create_vpc ||
+        var.existing_private_subnet_egress_mode != "vpc_endpoints" ||
+        toset(keys(var.existing_private_vpc_endpoint_ids)) == local.required_private_endpoint_services
+      )
+      error_message = "VPC endpoint egress requires exactly one endpoint ID for config, DynamoDB, EC2, ECR API/DKR, EKS, EKS Auth, Logs, S3, Secrets Manager, SQS, and STS."
+    }
+
+    precondition {
+      condition = (
+        var.create_vpc ||
+        var.existing_private_subnet_egress_mode != "vpc_endpoints" ||
+        toset(keys(var.existing_private_interface_endpoint_security_group_ids)) == local.required_interface_endpoint_services
+      )
+      error_message = "VPC endpoint egress requires exactly one attached security group for every required interface endpoint."
+    }
+
+    precondition {
+      condition = (
+        !var.create_vpc &&
+        var.existing_private_subnet_egress_mode == "vpc_endpoints"
+        ) || (
+        length(var.existing_private_vpc_endpoint_ids) == 0 &&
+        length(var.existing_private_interface_endpoint_security_group_ids) == 0
+      )
+      error_message = "Existing endpoint IDs and endpoint security groups are valid only for existing-VPC vpc_endpoints egress mode."
+    }
+
+    precondition {
+      condition = (
+        var.create_vpc ||
+        var.existing_private_subnet_egress_mode != "vpc_endpoints" ||
+        alltrue([
+          for service, endpoint in data.aws_vpc_endpoint.existing_private :
+          endpoint.vpc_id == var.existing_vpc_id &&
+          endpoint.state == "available" &&
+          endpoint.service_name == local.expected_endpoint_service_names[service]
+        ])
+      )
+      error_message = "Every supplied VPC endpoint must be available, belong to existing_vpc_id, and expose the expected regional AWS service."
+    }
+
+    precondition {
+      condition = (
+        var.create_vpc ||
+        var.existing_private_subnet_egress_mode != "vpc_endpoints" ||
+        try(alltrue([
+          for service in local.required_gateway_endpoint_services :
+          data.aws_vpc_endpoint.existing_private[service].vpc_endpoint_type == "Gateway" &&
+          length(setsubtract(
+            local.existing_private_route_table_ids,
+            toset(data.aws_vpc_endpoint.existing_private[service].route_table_ids)
+          )) == 0
+        ]), false)
+      )
+      error_message = "S3 and DynamoDB endpoints must be Gateway endpoints associated with every selected private-subnet route table."
+    }
+
+    precondition {
+      condition = (
+        var.create_vpc ||
+        var.existing_private_subnet_egress_mode != "vpc_endpoints" ||
+        try(alltrue([
+          for service in local.required_interface_endpoint_services :
+          data.aws_vpc_endpoint.existing_private[service].vpc_endpoint_type == "Interface" &&
+          data.aws_vpc_endpoint.existing_private[service].private_dns_enabled &&
+          contains(
+            data.aws_vpc_endpoint.existing_private[service].security_group_ids,
+            var.existing_private_interface_endpoint_security_group_ids[service]
+          )
+        ]), false)
+      )
+      error_message = "Every required interface endpoint must have private DNS enabled and include its explicitly selected security group."
     }
 
     precondition {
@@ -210,6 +404,27 @@ resource "terraform_data" "network_validation" {
         ]
       ]))
       error_message = "Existing private subnets must not route directly to an internet gateway."
+    }
+
+    precondition {
+      condition = (
+        var.create_vpc ||
+        var.existing_private_subnet_egress_mode == null ||
+        var.existing_private_subnet_egress_mode == "vpc_endpoints" ||
+        alltrue([
+          for table in values(data.aws_route_table.existing_private) :
+          anytrue([
+            for route in table.routes :
+            route.cidr_block == "0.0.0.0/0" &&
+            route.state == "active" && (
+              var.existing_private_subnet_egress_mode == "nat_gateway" ?
+              try(startswith(route.nat_gateway_id, "nat-"), false) :
+              try(startswith(route.transit_gateway_id, "tgw-"), false)
+            )
+          ])
+        ])
+      )
+      error_message = "Every existing private subnet must have a matching IPv4 default route through the declared NAT gateway or transit gateway."
     }
 
     precondition {
@@ -438,6 +653,29 @@ resource "aws_vpc_security_group_egress_rule" "lambda_https" {
   ip_protocol       = "tcp"
 }
 
+resource "aws_vpc_security_group_ingress_rule" "existing_endpoint_lambda_runtime" {
+  for_each = !var.create_vpc && var.existing_private_subnet_egress_mode == "vpc_endpoints" ? local.existing_interface_endpoint_security_group_ids : toset([])
+
+  security_group_id            = each.value
+  referenced_security_group_id = aws_security_group.lambda_runtime.id
+  description                  = "TLS from portscanner runtime Lambdas"
+  from_port                    = 443
+  to_port                      = 443
+  ip_protocol                  = "tcp"
+}
+
+resource "aws_vpc_security_group_ingress_rule" "existing_endpoint_lambda_database" {
+  for_each = !var.create_vpc && var.existing_private_subnet_egress_mode == "vpc_endpoints" ? local.existing_interface_endpoint_security_group_ids : toset([])
+
+  security_group_id            = each.value
+  referenced_security_group_id = aws_security_group.lambda_database.id
+  description                  = "TLS from portscanner database Lambdas"
+  from_port                    = 443
+  to_port                      = 443
+  ip_protocol                  = "tcp"
+}
+
+data "aws_partition" "current" {}
 data "aws_region" "current" {}
 
 output "vpc_id" {
@@ -462,4 +700,9 @@ output "lambda_runtime_security_group_id" {
 
 output "lambda_database_security_group_id" {
   value = aws_security_group.lambda_database.id
+}
+
+output "existing_interface_endpoint_security_group_ids" {
+  description = "Validated interface endpoint security groups that require EKS workload ingress."
+  value       = local.existing_interface_endpoint_security_group_ids
 }

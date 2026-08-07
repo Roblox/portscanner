@@ -1,13 +1,24 @@
 from __future__ import annotations
 
+import copy
 import json
 import unittest
 from datetime import timedelta
 
+from portscanner_inventory.base import (
+    OwnershipCheck as InventoryOwnershipCheck,
+)
+from portscanner_inventory.base import OwnershipVerdict
+
 from portscanner_generator.config import GeneratorConfig
 from portscanner_generator.handler import GeneratorServices, lambda_handler
 from portscanner_generator.idempotency import ClaimDisposition, ClaimState
-from portscanner_generator.kubernetes import CreateResult, KubernetesScannerClient
+from portscanner_generator.kubernetes import (
+    CreateResult,
+    KubernetesScannerClient,
+    ScannerConflictError,
+)
+from portscanner_generator.scanner_resource import scanner_name
 
 from .fakes import (
     NOW,
@@ -70,24 +81,38 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(len(ownership.calls), 2)
         self.assertEqual(claims.completed[0]["state"], ClaimState.DISPATCHED)
 
-    def test_stale_is_acknowledged_without_kubernetes_access(self) -> None:
+    def test_stale_is_acknowledged_after_exact_retry_cleanup(self) -> None:
         document = event_document()
+        target_id = document["target"]["target_id"]  # type: ignore[index]
+        exact_name = scanner_name(document["event_id"])
         claims = FakeClaimStore()
         scanner_factory_calls = 0
+        scanner = FakeScannerClient(
+            items=[
+                scanner_item(target_id, 3, exact_name),
+                scanner_item(target_id, 3, "same-generation-sibling"),
+                scanner_item(target_id, 4, "newer-scan"),
+            ]
+        )
 
         def scanner_factory() -> FakeScannerClient:
             nonlocal scanner_factory_calls
             scanner_factory_calls += 1
-            return FakeScannerClient()
+            return scanner
+
+        class ProductionStaleOwnership:
+            def validate_event(self, _event: object) -> InventoryOwnershipCheck:
+                return InventoryOwnershipCheck(
+                    OwnershipVerdict.STALE,
+                    reason="generation",
+                    current_generation=4,
+                )
 
         services = GeneratorServices(
             config=config(),
             s3_client=FakeS3(json.dumps(document).encode()),
             claim_store=claims,  # type: ignore[arg-type]
-            ownership_service=FakeOwnershipService(
-                "STALE",
-                current_generation=4,
-            ),
+            ownership_service=ProductionStaleOwnership(),
             scanner_client_factory=scanner_factory,
             event_parser=parse_test_event,
             clock=lambda: NOW,
@@ -100,7 +125,52 @@ class DispatchTests(unittest.TestCase):
         )
 
         self.assertEqual(response, {"batchItemFailures": []})
-        self.assertEqual(scanner_factory_calls, 0)
+        self.assertEqual(scanner_factory_calls, 1)
+        self.assertEqual(scanner.deleted, [exact_name, "same-generation-sibling"])
+        self.assertEqual(
+            [item["metadata"]["name"] for item in scanner.items],
+            ["newer-scan"],
+        )
+        self.assertEqual(claims.completed[0]["state"], ClaimState.STALE)
+
+    def test_policy_stale_cancels_same_generation_siblings_but_preserves_newer(self) -> None:
+        document = event_document()
+        target_id = document["target"]["target_id"]  # type: ignore[index]
+        exact_name = scanner_name(document["event_id"])
+        scanner = FakeScannerClient(
+            items=[
+                scanner_item(target_id, 3, exact_name),
+                scanner_item(target_id, 3, "same-generation-sibling"),
+                scanner_item(target_id, 4, "newer-scan"),
+            ]
+        )
+        claims = FakeClaimStore()
+
+        class PolicyStaleOwnership:
+            def validate_event(self, _event: object) -> InventoryOwnershipCheck:
+                return InventoryOwnershipCheck(
+                    OwnershipVerdict.STALE,
+                    reason="policy-or-lifecycle",
+                    current_generation=3,
+                )
+
+        response = lambda_handler(
+            {"Records": [sqs_record(document)]},
+            None,
+            services=services_for(
+                document,
+                PolicyStaleOwnership(),
+                claims,
+                scanner,
+            ),
+        )
+
+        self.assertEqual(response, {"batchItemFailures": []})
+        self.assertEqual(scanner.deleted, [exact_name, "same-generation-sibling"])
+        self.assertEqual(
+            [item["metadata"]["name"] for item in scanner.items],
+            ["newer-scan"],
+        )
         self.assertEqual(claims.completed[0]["state"], ClaimState.STALE)
 
     def test_moved_and_inactive_cancel_without_dispatch(self) -> None:
@@ -108,7 +178,15 @@ class DispatchTests(unittest.TestCase):
             with self.subTest(verdict=verdict):
                 document = event_document()
                 target_id = document["target"]["target_id"]  # type: ignore[index]
-                scanner = FakeScannerClient(items=[scanner_item(target_id, 1, "older-scan")])
+                exact_name = scanner_name(document["event_id"])
+                scanner = FakeScannerClient(
+                    items=[
+                        scanner_item(target_id, 1, "older-scan"),
+                        scanner_item(target_id, 3, exact_name),
+                        scanner_item(target_id, 3, "same-generation-sibling"),
+                        scanner_item(target_id, 4, "newer-scan"),
+                    ]
+                )
                 claims = FakeClaimStore()
                 response = lambda_handler(
                     {"Records": [sqs_record(document)]},
@@ -122,7 +200,14 @@ class DispatchTests(unittest.TestCase):
                 )
 
                 self.assertEqual(response, {"batchItemFailures": []})
-                self.assertEqual(scanner.deleted, ["older-scan"])
+                self.assertEqual(
+                    scanner.deleted,
+                    [exact_name, "older-scan", "same-generation-sibling"],
+                )
+                self.assertEqual(
+                    [item["metadata"]["name"] for item in scanner.items],
+                    ["newer-scan"],
+                )
                 self.assertEqual(scanner.created, [])
                 self.assertEqual(
                     claims.completed[0]["state"],
@@ -211,7 +296,9 @@ class DispatchTests(unittest.TestCase):
 
         document = event_document()
         claims = FakeClaimStore()
-        scanner = FakeScannerClient()
+        target_id = document["target"]["target_id"]  # type: ignore[index]
+        exact_name = scanner_name(document["event_id"])
+        scanner = FakeScannerClient(items=[scanner_item(target_id, 3, exact_name)])
         services = GeneratorServices(
             config=config(),
             s3_client=FakeS3(json.dumps(document).encode()),
@@ -230,7 +317,40 @@ class DispatchTests(unittest.TestCase):
 
         self.assertEqual(response, {"batchItemFailures": []})
         self.assertEqual(scanner.created, [])
+        self.assertEqual(scanner.deleted, [exact_name])
         self.assertEqual(claims.completed[0]["state"], ClaimState.CANCELLED)
+
+    def test_deadline_is_rechecked_immediately_before_create(self) -> None:
+        deadline = NOW + timedelta(seconds=1)
+        document = event_document(
+            deadline_at=deadline,
+            not_after=NOW + timedelta(minutes=30),
+        )
+        target_id = document["target"]["target_id"]  # type: ignore[index]
+        exact_name = scanner_name(document["event_id"])
+        scanner = FakeScannerClient(items=[scanner_item(target_id, 3, exact_name)])
+        claims = FakeClaimStore()
+        times = iter((NOW, deadline, deadline))
+        services = GeneratorServices(
+            config=config(),
+            s3_client=FakeS3(json.dumps(document).encode()),
+            claim_store=claims,  # type: ignore[arg-type]
+            ownership_service=FakeOwnershipService("ACTIVE"),
+            scanner_client_factory=lambda: scanner,
+            event_parser=parse_test_event,
+            clock=lambda: next(times),
+        )
+
+        response = lambda_handler(
+            {"Records": [sqs_record(document)]},
+            None,
+            services=services,
+        )
+
+        self.assertEqual(response, {"batchItemFailures": []})
+        self.assertEqual(scanner.created, [])
+        self.assertEqual(scanner.deleted, [exact_name])
+        self.assertEqual(claims.completed[0]["state"], ClaimState.EXPIRED)
 
     def test_active_generation_mismatch_fails_closed(self) -> None:
         cases = (
@@ -261,7 +381,13 @@ class DispatchTests(unittest.TestCase):
     def test_removed_event_cancels_lower_generation_even_when_stale(self) -> None:
         document = event_document(event_type="target.removed")
         target_id = document["target"]["target_id"]  # type: ignore[index]
-        scanner = FakeScannerClient(items=[scanner_item(target_id, 2, "older-scan")])
+        exact_name = scanner_name(document["event_id"])
+        scanner = FakeScannerClient(
+            items=[
+                scanner_item(target_id, 2, "older-scan"),
+                scanner_item(target_id, 3, exact_name),
+            ]
+        )
         claims = FakeClaimStore()
 
         response = lambda_handler(
@@ -276,7 +402,7 @@ class DispatchTests(unittest.TestCase):
         )
 
         self.assertEqual(response, {"batchItemFailures": []})
-        self.assertEqual(scanner.deleted, ["older-scan"])
+        self.assertEqual(scanner.deleted, [exact_name, "older-scan"])
         self.assertEqual(scanner.created, [])
         self.assertEqual(claims.completed[0]["state"], ClaimState.REMOVED)
 
@@ -336,7 +462,13 @@ class DispatchTests(unittest.TestCase):
             removed_at=NOW,
         )
         document = removal.to_dict()
-        scanner = FakeScannerClient(items=[scanner_item(target.target_id, 3, "older-scan")])
+        exact_name = scanner_name(removal.event_id)
+        scanner = FakeScannerClient(
+            items=[
+                scanner_item(target.target_id, 3, "older-scan"),
+                scanner_item(target.target_id, 4, exact_name),
+            ]
+        )
         claims = FakeClaimStore()
         services = GeneratorServices(
             config=config(),
@@ -354,7 +486,7 @@ class DispatchTests(unittest.TestCase):
         )
 
         self.assertEqual(response, {"batchItemFailures": []})
-        self.assertEqual(scanner.deleted, ["older-scan"])
+        self.assertEqual(scanner.deleted, [exact_name, "older-scan"])
         self.assertEqual(scanner.created, [])
         self.assertEqual(claims.completed[0]["state"], ClaimState.REMOVED)
 
@@ -398,17 +530,88 @@ class DispatchTests(unittest.TestCase):
             status = 409
 
         class CustomObjectsApi:
+            def __init__(self, existing: dict[str, object]) -> None:
+                self.existing = existing
+                self.gets = 0
+
             def create_namespaced_custom_object(self, **_: object) -> None:
                 raise Conflict()
 
-        client = KubernetesScannerClient(CustomObjectsApi(), config())
-        result = client.create(
-            {
-                "metadata": {"name": "scan-fixture"},
-                "spec": {},
-            }
-        )
+            def get_namespaced_custom_object(self, **_: object) -> dict[str, object]:
+                self.gets += 1
+                return self.existing
+
+        body = {
+            "metadata": {
+                "name": "scan-fixture",
+                "labels": {"immutable.example/event": "same"},
+            },
+            "spec": {"eventId": "event-fixture"},
+        }
+        defaulted = copy.deepcopy(body)
+        defaulted["spec"] = {
+            **copy.deepcopy(body["spec"]),
+            "retryLimit": 0,
+            "ttlSecondsAfterFinished": 3600,
+        }
+        api = CustomObjectsApi(defaulted)
+        client = KubernetesScannerClient(api, config())
+        result = client.create(body)
+
         self.assertIs(result, CreateResult.ALREADY_EXISTS)
+        self.assertEqual(api.gets, 1)
+
+    def test_kubernetes_409_rejects_incompatible_or_terminal_existing_scanner(self) -> None:
+        class Conflict(Exception):
+            status = 409
+
+        body = {
+            "metadata": {
+                "name": "scan-fixture",
+                "labels": {"immutable.example/event": "same"},
+            },
+            "spec": {"eventId": "event-fixture"},
+        }
+        cases = {
+            "spec": {
+                **copy.deepcopy(body),
+                "spec": {"eventId": "different"},
+            },
+            "labels": {
+                **copy.deepcopy(body),
+                "metadata": {
+                    "name": "scan-fixture",
+                    "labels": {"immutable.example/event": "different"},
+                },
+            },
+            "deleting": {
+                **copy.deepcopy(body),
+                "metadata": {
+                    **copy.deepcopy(body["metadata"]),
+                    "deletionTimestamp": "2030-01-02T03:04:05Z",
+                },
+            },
+            "cancelled": {
+                **copy.deepcopy(body),
+                "status": {"outcome": "Cancelled"},
+            },
+        }
+
+        class CustomObjectsApi:
+            def __init__(self, existing: dict[str, object]) -> None:
+                self.existing = existing
+
+            def create_namespaced_custom_object(self, **_: object) -> None:
+                raise Conflict()
+
+            def get_namespaced_custom_object(self, **_: object) -> dict[str, object]:
+                return self.existing
+
+        for name, existing in cases.items():
+            with self.subTest(name=name):
+                client = KubernetesScannerClient(CustomObjectsApi(existing), config())
+                with self.assertRaises(ScannerConflictError):
+                    client.create(body)
 
     def test_logs_hashes_without_raw_target_or_address(self) -> None:
         document = event_document()

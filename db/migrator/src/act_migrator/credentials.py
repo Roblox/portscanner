@@ -14,7 +14,7 @@ from botocore.exceptions import ClientError
 from psycopg import sql
 
 from .config import DatabaseSettings
-from .migrator import MigrationError
+from .migrator import MigrationError, migration_advisory_lock
 
 DEFAULT_APPLICATION_USERNAME = "portscanner_runtime"
 _PASSWORD_BYTES = 48
@@ -153,21 +153,22 @@ def provision_application_credentials(
     if not application_secret_id:
         raise MigrationError("DB_APPLICATION_SECRET_ID is required")
     username = _validate_username(application_username)
-    current_secret = _read_application_secret(secrets_client, application_secret_id)
-    factory = password_factory or (lambda: secrets.token_urlsafe(_PASSWORD_BYTES))
-    password = _stored_password(current_secret, username, factory)
-    role_created = _repair_role(connection, username, password)
+    with migration_advisory_lock(connection):
+        current_secret = _read_application_secret(secrets_client, application_secret_id)
+        factory = password_factory or (lambda: secrets.token_urlsafe(_PASSWORD_BYTES))
+        password = _stored_password(current_secret, username, factory)
+        role_created = _repair_role(connection, username, password)
 
-    payload = _secret_payload(database, username, password)
-    secret_updated = current_secret != payload
-    if secret_updated:
-        secrets_client.put_secret_value(
-            SecretId=application_secret_id,
-            SecretString=json.dumps(
-                payload,
-                ensure_ascii=True,
-                separators=(",", ":"),
-                sort_keys=True,
-            ),
-        )
-    return ProvisioningResult(role_created=role_created, secret_updated=secret_updated)
+        payload = _secret_payload(database, username, password)
+        secret_updated = current_secret != payload
+        if secret_updated:
+            secrets_client.put_secret_value(
+                SecretId=application_secret_id,
+                SecretString=json.dumps(
+                    payload,
+                    ensure_ascii=True,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+            )
+        return ProvisioningResult(role_created=role_created, secret_updated=secret_updated)

@@ -103,6 +103,100 @@ def test_target_identity_ignores_mutable_public_state() -> None:
     assert replacement.generation != target.generation
 
 
+def test_target_event_identity_includes_dispatch_context_but_excludes_tags() -> None:
+    event = TargetEvent.from_json((EXAMPLES / "target-event.json").read_text(encoding="utf-8"))
+    replacement_target = Target.create(
+        provider=event.target.provider,
+        scope_id=event.target.scope_id,
+        location=event.target.location,
+        resource_id=event.target.resource_id,
+        private_address=event.target.private_address,
+        public_address="198.51.100.61",
+        address_family=event.target.address_family,
+        transport=event.target.transport,
+        generation=event.target.generation,
+    )
+    replacement_context = AwsContext.model_validate(
+        {
+            **event.aws_context.to_dict(),
+            "public_ip": replacement_target.public_address,
+        }
+    )
+    moved = TargetEvent.create(
+        schema_version=event.schema_version,
+        event_type=event.event_type,
+        target=replacement_target,
+        source=event.source,
+        policy_change=event.policy_change,
+        scan=event.scan,
+        aws_context=replacement_context,
+    )
+    retagged_context = AwsContext.model_validate(
+        {
+            **event.aws_context.to_dict(),
+            "tags": {
+                **event.aws_context.tags.to_dict(),
+                "name": "different-current-context",
+            },
+        }
+    )
+    retagged = TargetEvent.create(
+        schema_version=event.schema_version,
+        event_type=event.event_type,
+        target=event.target,
+        source=event.source,
+        policy_change=event.policy_change,
+        scan=event.scan,
+        aws_context=retagged_context,
+    )
+    new_target_scan = ScanDirective.create(
+        target_id=event.target.target_id,
+        target_generation=event.target.generation,
+        reason=ScanReason.NEW_TARGET,
+        profile=ScanProfile.FAST_FULL_TCP,
+        priority=100,
+        requested_at=event.scan.requested_at,
+        deadline_at=event.scan.deadline_at,
+        not_after=event.scan.not_after,
+        tcp_port_ranges=(FULL_TCP_PORT_RANGE,),
+    )
+    new_target_context = AwsContext.model_validate(
+        {
+            **event.aws_context.to_dict(),
+            "candidate_tcp_port_ranges": (FULL_TCP_PORT_RANGE,),
+        }
+    )
+    new_target = TargetEvent.create(
+        schema_version=event.schema_version,
+        event_type=TargetEventType.TARGET_UPSERT,
+        target=event.target,
+        source=event.source,
+        policy_change=None,
+        scan=new_target_scan,
+        aws_context=new_target_context,
+    )
+    changed_policy_context = AwsContext.model_validate(
+        {
+            **new_target_context.to_dict(),
+            "policy_fingerprint": "f" * 64,
+        }
+    )
+    changed_policy = TargetEvent.create(
+        schema_version=new_target.schema_version,
+        event_type=new_target.event_type,
+        target=new_target.target,
+        source=new_target.source,
+        policy_change=None,
+        scan=new_target.scan,
+        aws_context=changed_policy_context,
+    )
+
+    assert moved.target.target_id == event.target.target_id
+    assert moved.event_id != event.event_id
+    assert retagged.event_id == event.event_id
+    assert changed_policy.event_id != new_target.event_id
+
+
 def test_tampered_deterministic_id_is_rejected() -> None:
     payload = _load(EXAMPLES / "target-event.json")
     target = payload["target"]
@@ -453,7 +547,7 @@ def test_contract_vocabulary_is_exact() -> None:
     }
     assert {item.value for item in FindingStatus} == {"open", "resolved"}
     assert {item.value for item in FindingSeverity} == {
-        "info",
+        "informational",
         "low",
         "medium",
         "high",

@@ -68,6 +68,23 @@ def _partial_explicit_states(
     return states
 
 
+def _observation_state(
+    nmap_state: str,
+    *,
+    complete: bool,
+    enrichment_set_changed: bool,
+) -> str:
+    if complete:
+        return nmap_state_to_observation(nmap_state)
+    if enrichment_set_changed:
+        # Discovery and enrichment observed different open sets. Neither phase
+        # is authoritative for a state transition in this attempt.
+        return "UNKNOWN"
+    # A partial run can retain positive OPEN evidence. It can never prove
+    # closure for any port because Nmap did not finish the declared work.
+    return "OPEN" if nmap_state == "open" else "UNKNOWN"
+
+
 def parse_authoritative_result(
     envelope: Mapping[str, Any],
     raw_xml: bytes,
@@ -99,6 +116,11 @@ def parse_authoritative_result(
         raise ResultIntegrityError("ScanResult coverage is not canonical")
 
     complete = coverage_payload.get("complete") is True
+    error_payload = canonical.get("error")
+    enrichment_set_changed = (
+        isinstance(error_payload, Mapping)
+        and error_payload.get("type") == "enrichment_port_set_changed"
+    )
     try:
         if complete:
             report = validate_complete_scan_bytes(
@@ -127,17 +149,15 @@ def parse_authoritative_result(
 
     observations = []
     for port, nmap_state in sorted(explicit_states.items()):
-        if complete:
-            state = nmap_state_to_observation(nmap_state)
-        else:
-            # A partial run can retain positive OPEN evidence. It can never prove
-            # closure for any port because Nmap did not finish the declared work.
-            state = "OPEN" if nmap_state == "open" else "UNKNOWN"
         observations.append(
             {
                 "protocol": "tcp",
                 "port": port,
-                "state": state,
+                "state": _observation_state(
+                    nmap_state,
+                    complete=complete,
+                    enrichment_set_changed=enrichment_set_changed,
+                ),
                 "nmap_state": nmap_state,
             }
         )

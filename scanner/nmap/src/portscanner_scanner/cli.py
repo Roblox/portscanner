@@ -7,9 +7,14 @@ from __future__ import annotations
 
 import argparse
 import os
+import signal
 import sys
 import tempfile
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from datetime import UTC, datetime
+from threading import Event
+from types import FrameType
 from typing import Any
 
 from . import __version__
@@ -47,6 +52,32 @@ def _environment_list(name: str) -> list[str]:
 
 def _first_environment(names: Sequence[str]) -> str | None:
     return next((os.environ[name] for name in names if name in os.environ), None)
+
+
+def _utc_timestamp(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("timestamp must be RFC3339") from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise argparse.ArgumentTypeError("timestamp must include a UTC offset")
+    return parsed.astimezone(UTC)
+
+
+@contextmanager
+def _termination_signal_handlers(termination_event: Event) -> Iterator[None]:
+    previous = {signum: signal.getsignal(signum) for signum in (signal.SIGTERM, signal.SIGINT)}
+
+    def request_termination(_signum: int, _frame: FrameType | None) -> None:
+        termination_event.set()
+
+    try:
+        for signum in previous:
+            signal.signal(signum, request_termination)
+        yield
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
 
 
 def _required_or_environment(
@@ -178,6 +209,20 @@ def build_parser() -> argparse.ArgumentParser:
         help_text="positive inventory generation",
         type=int,
     )
+    _required_or_environment(
+        parser,
+        "--deadline-at",
+        environment=("SCAN_DEADLINE_AT", "PORTSCANNER_DEADLINE_AT"),
+        help_text="latest generator dispatch timestamp",
+        type=_utc_timestamp,
+    )
+    _required_or_environment(
+        parser,
+        "--not-after",
+        environment=("SCAN_NOT_AFTER", "PORTSCANNER_NOT_AFTER"),
+        help_text="absolute scan execution cutoff",
+        type=_utc_timestamp,
+    )
 
     parser.add_argument(
         "--allowed-cidr",
@@ -247,6 +292,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=os.environ.get("NMAP_VERSION_INTENSITY", "5"),
     )
+    parser.add_argument(
+        "--upload-reserve-seconds",
+        type=int,
+        default=os.environ.get("SCANNER_UPLOAD_RESERVE_SECONDS", "30"),
+    )
     return parser
 
 
@@ -278,6 +328,8 @@ def _request_from_args(args: argparse.Namespace) -> ScanRequest:
         image_version=args.image_version,
         bucket=args.s3_bucket,
         prefix=args.s3_prefix,
+        deadline_at=args.deadline_at,
+        not_after=args.not_after,
         ports=args.ports,
         deep_scripts=tuple(args.deep_script),
         configured_script_allowlist=configured_script_allowlist(
@@ -301,6 +353,7 @@ def _tuning_from_args(args: argparse.Namespace) -> NmapTuning:
         enrichment_process_timeout_seconds=args.enrichment_timeout,
         script_timeout_seconds=args.script_timeout,
         version_intensity=args.version_intensity,
+        upload_reserve_seconds=args.upload_reserve_seconds,
     )
 
 
@@ -310,7 +363,11 @@ def _default_writer() -> S3ConditionalWriter:
 
     client = boto3.client(
         "s3",
-        config=Config(retries={"mode": "standard", "max_attempts": 4}),
+        config=Config(
+            connect_timeout=5,
+            read_timeout=5,
+            retries={"mode": "standard", "max_attempts": 2},
+        ),
     )
     return S3ConditionalWriter(client)
 
@@ -327,19 +384,26 @@ def main(
     try:
         request = _request_from_args(args)
         tuning = _tuning_from_args(args)
-        selected_runner = runner if runner is not None else SubprocessRunner()
+        termination_event = Event()
+        selected_runner = (
+            runner if runner is not None else SubprocessRunner(termination_event=termination_event)
+        )
         selected_writer = writer if writer is not None else _default_writer()
         temporary_root = os.environ.get("SCANNER_TMPDIR", "/tmp")  # noqa: S108
-        with tempfile.TemporaryDirectory(
-            prefix="portscanner-verify-",
-            dir=temporary_root,
-        ) as working_directory:
+        with (
+            _termination_signal_handlers(termination_event),
+            tempfile.TemporaryDirectory(
+                prefix="portscanner-verify-",
+                dir=temporary_root,
+            ) as working_directory,
+        ):
             executor(
                 request,
                 tuning=tuning,
                 runner=selected_runner,
                 writer=selected_writer,
                 working_directory=working_directory,
+                termination_requested=termination_event.is_set,
             )
     except ScanExecutionError as error:
         sys.stderr.write(f"scan failed: {error.error_type}\n")

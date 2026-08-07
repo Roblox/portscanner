@@ -121,10 +121,12 @@ make test-go
 make vet-go
 ```
 
-`make ci` adds offline Terraform and Kubernetes rendering. `make containers` builds all
-seven images. Deployment is intentionally staged with dispatch disabled until images,
-migrations, the operator, and an authorized canary are ready; follow the
-[AWS deployment guide](docs/aws-deployment.md).
+`make ci` adds backend-disabled Terraform validation and Kubernetes rendering.
+Terraform provider installation can require network access; it is not an offline check.
+`make containers` builds all seven images from committed, tracked-only contexts. Python
+Lambda dependencies come from checked-in hash-verified `uv.lock` exports. Deployment is
+intentionally staged with dispatch disabled until images, migrations, the operator, and
+an authorized canary are ready; follow the [AWS deployment guide](docs/aws-deployment.md).
 
 ## Documentation
 

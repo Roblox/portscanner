@@ -90,6 +90,7 @@ func TestEnvtestOneShotCreation(t *testing.T) {
 	scanner.UID = ""
 	scanner.ResourceVersion = ""
 	scanner.Generation = 0
+	scanner.Spec.Reason = scanningv1alpha1.ReasonTargetChange
 	if err := manager.GetClient().Create(ctx, scanner); err != nil {
 		t.Fatalf("create Scanner: %v", err)
 	}
@@ -115,6 +116,29 @@ func TestEnvtestOneShotCreation(t *testing.T) {
 	}
 	if jobs.Items[0].Name != deterministicJobName(scanner) {
 		t.Fatalf("Job name = %q, want deterministic %q", jobs.Items[0].Name, deterministicJobName(scanner))
+	}
+
+	tooManyTerms := validScanner(now)
+	tooManyTerms.Name = "too-many-coverage-terms"
+	tooManyTerms.Namespace = namespace.Name
+	tooManyTerms.UID = ""
+	tooManyTerms.ResourceVersion = ""
+	tooManyTerms.Generation = 0
+	tooManyTerms.Spec.Profile = scanningv1alpha1.ProfileTargetedTCP
+	tooManyTerms.Spec.Ports = make([]int32, maxCoverageTerms/2)
+	for index := range tooManyTerms.Spec.Ports {
+		tooManyTerms.Spec.Ports[index] = int32(index + 1)
+	}
+	tooManyTerms.Spec.Ranges = make(
+		[]scanningv1alpha1.PortRange,
+		maxCoverageTerms-len(tooManyTerms.Spec.Ports)+1,
+	)
+	for index := range tooManyTerms.Spec.Ranges {
+		port := int32(1_000 + index*2)
+		tooManyTerms.Spec.Ranges[index] = scanningv1alpha1.PortRange{Start: port, End: port}
+	}
+	if err := manager.GetClient().Create(ctx, tooManyTerms); !apierrors.IsInvalid(err) {
+		t.Fatalf("oversized coverage create error = %v, want Invalid", err)
 	}
 
 	var stored scanningv1alpha1.Scanner

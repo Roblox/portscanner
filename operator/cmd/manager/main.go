@@ -78,7 +78,7 @@ func main() {
 	flag.StringVar(&resultPrefix, "result-prefix", "", "Result object key prefix.")
 	flag.StringVar(&highPriorityClass, "high-priority-class", "portscanner-high", "PriorityClass for high-priority requests.")
 	flag.StringVar(&normalPriorityClass, "normal-priority-class", "portscanner-normal", "PriorityClass for normal-priority requests.")
-	flag.IntVar(&highPriorityThreshold, "high-priority-threshold", 500, "Priority value at or above which the high class is used.")
+	flag.IntVar(&highPriorityThreshold, "high-priority-threshold", 100, "Priority value at or above which the high class is used.")
 	flag.StringVar(&cpuRequest, "scanner-cpu-request", "100m", "Scanner CPU request.")
 	flag.StringVar(&cpuLimit, "scanner-cpu-limit", "1", "Scanner CPU limit.")
 	flag.StringVar(&memoryRequest, "scanner-memory-request", "128Mi", "Scanner memory request.")

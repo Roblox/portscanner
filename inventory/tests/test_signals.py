@@ -193,3 +193,22 @@ def test_resolution_errors_are_unknown_not_inactive() -> None:
 
     assert result.status is ResolutionStatus.UNKNOWN
     assert result.targets == ()
+
+
+def test_release_of_missing_allocation_resolves_as_definitively_absent() -> None:
+    class MissingAllocation:
+        def describe_addresses(self, **_request: Any) -> dict[str, Any]:
+            raise AwsError("InvalidAllocationID.NotFound")
+
+    hint = parse_signal(
+        _cloudtrail(
+            "ReleaseAddress",
+            {"allocationId": "eipalloc-cccccccc"},
+        )
+    )
+    assert hint is not None
+
+    result = Ec2Resolver(lambda _account, _region: MissingAllocation()).resolve(hint)
+
+    assert result.status is ResolutionStatus.COMPLETE
+    assert result.targets == ()

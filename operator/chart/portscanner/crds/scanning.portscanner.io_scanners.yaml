@@ -65,8 +65,8 @@ spec:
                 type: boolean
               deadline:
                 description: |-
-                  Deadline is the request deadline. The earlier of Deadline and NotAfter
-                  becomes the Job active deadline.
+                  Deadline is the latest time at which the generator may dispatch this
+                  request. It does not truncate an already-dispatched scan.
                 format: date-time
                 type: string
               directiveId:
@@ -80,7 +80,9 @@ spec:
                 pattern: ^[0-9a-f]{64}$
                 type: string
               notAfter:
-                description: NotAfter is the source event's absolute expiry time.
+                description: |-
+                  NotAfter is the source event's absolute execution cutoff. It becomes the
+                  Job active deadline and is enforced independently by the scanner.
                 format: date-time
                 type: string
               ports:
@@ -92,7 +94,7 @@ spec:
                   maximum: 65535
                   minimum: 1
                   type: integer
-                maxItems: 65535
+                maxItems: 256
                 type: array
                 x-kubernetes-list-type: set
               priority:
@@ -127,12 +129,13 @@ spec:
                   - end
                   - start
                   type: object
-                maxItems: 1024
+                maxItems: 256
                 type: array
               reason:
                 description: Reason describes why the scan was requested.
                 enum:
                 - new_target
+                - target_change
                 - policy_change
                 - coverage
                 - manual
@@ -237,8 +240,9 @@ spec:
                 type: string
               ttlSecondsAfterFinished:
                 default: 3600
-                description: TTLSecondsAfterFinished controls cleanup of the completed
-                  Job.
+                description: |-
+                  TTLSecondsAfterFinished controls cleanup of the terminal Scanner and its
+                  owned Job.
                 format: int32
                 minimum: 0
                 type: integer
@@ -260,6 +264,12 @@ spec:
                 > 0) || (has(self.ranges) && size(self.ranges) > 0)
             - message: each port range start must be less than or equal to end
               rule: '!has(self.ranges) || self.ranges.all(r, r.start <= r.end)'
+            - message: combined TCP port and range coverage must contain at most 256
+                terms
+              rule: '(!has(self.ports) ? 0 : size(self.ports)) + (!has(self.ranges)
+                ? 0 : size(self.ranges)) <= 256'
+            - message: deadline must not be later than notAfter
+              rule: self.deadline <= self.notAfter
             - message: scan execution fields are immutable; only cancel may change
               rule: self.target == oldSelf.target && self.eventId == oldSelf.eventId
                 && self.directiveId == oldSelf.directiveId && self.traceId == oldSelf.traceId

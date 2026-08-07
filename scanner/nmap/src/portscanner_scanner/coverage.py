@@ -11,7 +11,8 @@ from dataclasses import dataclass
 
 MIN_PORT = 1
 MAX_PORT = 65_535
-MAX_COVERAGE_TERMS = 4_096
+MAX_COVERAGE_TERMS = 256
+MAX_INPUT_COVERAGE_TERMS = 4_096
 _TERM = re.compile(r"^(?P<start>[0-9]{1,5})(?:-(?P<end>[0-9]{1,5}))?$")
 
 
@@ -65,8 +66,10 @@ class PortCoverage:
                     raise CoverageError("port coverage terms must be strings")
                 raw_terms.extend(declaration.split(","))
 
-        if not raw_terms or len(raw_terms) > MAX_COVERAGE_TERMS:
-            raise CoverageError(f"port coverage must contain 1-{MAX_COVERAGE_TERMS} terms")
+        if not raw_terms or len(raw_terms) > MAX_INPUT_COVERAGE_TERMS:
+            raise CoverageError(
+                f"port coverage must contain 1-{MAX_INPUT_COVERAGE_TERMS} input terms"
+            )
 
         parsed: list[PortRange] = []
         for raw_term in raw_terms:
@@ -88,6 +91,10 @@ class PortCoverage:
                 normalized[-1] = PortRange(previous.start, max(previous.end, current.end))
             else:
                 normalized.append(current)
+        if len(normalized) > MAX_COVERAGE_TERMS:
+            raise CoverageError(
+                f"normalized port coverage must contain at most {MAX_COVERAGE_TERMS} terms"
+            )
         return cls(tuple(normalized))
 
     @classmethod

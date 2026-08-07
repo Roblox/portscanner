@@ -94,10 +94,35 @@ class OwnershipValidator:
             raise ValueError("security group view is incomplete")
         return groups
 
+    @staticmethod
+    def _event_matches_live_target(event: Any, current: NormalizedTarget) -> bool:
+        target = event.target
+        context = event.aws_context
+        return (
+            str(target.provider) == "aws"
+            and str(target.scope_id) == current.account_id
+            and str(target.location) == current.region
+            and str(target.resource_id) == current.network_interface_id
+            and str(target.private_address) == current.private_ip
+            and str(target.public_address) == current.public_ip
+            and str(context.account_id) == current.account_id
+            and str(context.region) == current.region
+            and str(context.network_interface_id) == current.network_interface_id
+            and str(context.private_ip) == current.private_ip
+            and str(context.public_ip) == current.public_ip
+            and context.instance_id == current.instance_id
+            and tuple(context.security_group_ids) == current.security_group_ids
+            and str(context.policy_fingerprint) == current.policy_fingerprint
+        )
+
     def validate(self, target_id: str, generation: int) -> OwnershipCheck:
         initial = self._state.get(target_id)
         if not self._current_state_matches(initial, generation):
-            return OwnershipCheck(OwnershipVerdict.STALE, reason="generation")
+            return OwnershipCheck(
+                OwnershipVerdict.STALE,
+                reason="generation",
+                current_generation=(initial.generation if initial is not None else None),
+            )
         expected: NormalizedTarget = initial.target
 
         try:
@@ -171,19 +196,44 @@ class OwnershipValidator:
             or current.security_group_ids != expected.security_group_ids
             or current.policy_fingerprint != expected.policy_fingerprint
         ):
-            return OwnershipCheck(OwnershipVerdict.STALE, current, "policy-or-lifecycle")
+            return OwnershipCheck(
+                OwnershipVerdict.STALE,
+                current,
+                "policy-or-lifecycle",
+                initial.generation,
+            )
 
         final = self._state.get(target_id)
         if not self._current_state_matches(final, generation):
-            return OwnershipCheck(OwnershipVerdict.STALE, current, "generation-race")
-        return OwnershipCheck(OwnershipVerdict.ACTIVE, current)
+            return OwnershipCheck(
+                OwnershipVerdict.STALE,
+                current,
+                "generation-race",
+                (final.generation if final is not None else None),
+            )
+        return OwnershipCheck(
+            OwnershipVerdict.ACTIVE,
+            current,
+            current_generation=generation,
+        )
 
     def validate_event(self, event: Any) -> OwnershipCheck:
-        """Validate a shared TargetEvent without relying on its hashed contract ID."""
+        """Validate a shared TargetEvent and its complete live AWS context."""
 
         context = event.aws_context
         stable_id = (
             f"aws:{context.account_id}:{context.region}:eni:{context.network_interface_id}:"
             f"private-ip:{context.private_ip}"
         )
-        return self.validate(stable_id, event.target.generation)
+        result = self.validate(stable_id, event.target.generation)
+        if result.verdict is not OwnershipVerdict.ACTIVE:
+            return result
+        if result.current is None:
+            return OwnershipCheck(OwnershipVerdict.UNKNOWN, reason="missing-live-target")
+        if not self._event_matches_live_target(event, result.current):
+            return OwnershipCheck(
+                OwnershipVerdict.STALE,
+                result.current,
+                "event-context",
+            )
+        return result

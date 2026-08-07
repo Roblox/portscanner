@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling>=1.27"]
+requires = ["hatchling==1.27.0"]
 build-backend = "hatchling.build"
 
 [project]
@@ -7,8 +7,13 @@ name = "portscanner-generator"
 version = "0.1.0"
 description = "Freshness-gated TargetEvent dispatcher for Scanner resources"
 requires-python = ">=3.12"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
+classifiers = [
+  "Programming Language :: Python :: 3.12",
+]
 dependencies = [
+  "awslambdaric>=4,<5",
   "boto3>=1.35",
   "kubernetes",
   "portscanner-contracts>=0.1.0",

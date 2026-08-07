@@ -8,7 +8,7 @@ import json
 import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, cast
 
 from portscanner_inventory.base import CandidatePorts
@@ -16,8 +16,8 @@ from portscanner_inventory.base import CandidatePorts
 _ACCOUNT_RE = re.compile(r"^[0-9]{12}$")
 _ENI_RE = re.compile(r"^eni-[0-9a-fA-F]+$")
 _SG_RE = re.compile(r"^sg-[0-9a-fA-F]+$")
-_RFC1918 = tuple(
-    ipaddress.ip_network(value) for value in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
+_DOCUMENTATION_NETWORKS = tuple(
+    ipaddress.ip_network(value) for value in ("192.0.2.0/24", "198.51.100.0/24", "203.0.113.0/24")
 )
 
 
@@ -162,13 +162,7 @@ def extract_security_group(
 
 def _validate_public_association(value: Any) -> str:
     address = ipaddress.IPv4Address(str(value))
-    if (
-        any(address in network for network in _RFC1918)
-        or address.is_loopback
-        or address.is_link_local
-        or address.is_multicast
-        or address.is_unspecified
-    ):
+    if not address.is_global and not any(address in network for network in _DOCUMENTATION_NETWORKS):
         raise ValueError("association is not a public IPv4 address")
     return str(address)
 
@@ -200,7 +194,11 @@ def _tags(value: Mapping[str, Any], allowlist: frozenset[str]) -> tuple[tuple[st
     for key, item_value in pairs:
         if not isinstance(key, str) or key not in allowlist or not isinstance(item_value, str):
             continue
-        if len(item_value) > 256 or any(ord(character) < 32 for character in item_value):
+        if (
+            not item_value.strip()
+            or len(item_value) > 256
+            or any(ord(character) < 32 for character in item_value)
+        ):
             continue
         sanitized[key] = item_value
     return tuple(sorted(sanitized.items()))
@@ -220,6 +218,28 @@ def _group_ids(value: Mapping[str, Any]) -> tuple[str, ...]:
     return tuple(sorted(result))
 
 
+def _public_association(
+    private_ip: Any,
+    association: Mapping[str, Any],
+) -> tuple[str, str, str | None, str | None] | None:
+    public_ip = _get(association, "PublicIp", "publicIp")
+    if not public_ip or not private_ip:
+        return None
+    try:
+        normalized_private = _validate_private_ip(private_ip)
+        normalized_public = _validate_public_association(public_ip)
+    except ValueError:
+        return None
+    allocation_id = _get(association, "AllocationId", "allocationId")
+    association_id = _get(association, "AssociationId", "associationId")
+    return (
+        normalized_private,
+        normalized_public,
+        str(allocation_id) if allocation_id else None,
+        str(association_id) if association_id else None,
+    )
+
+
 def _associations(
     value: Mapping[str, Any],
 ) -> tuple[tuple[str, str, str | None, str | None], ...]:
@@ -231,38 +251,16 @@ def _associations(
         if not isinstance(item, Mapping):
             continue
         association = _as_mapping(_get(item, "Association", "association", default={}))
-        public_ip = _get(association, "PublicIp", "publicIp")
         private_ip = _get(item, "PrivateIpAddress", "privateIpAddress")
-        if public_ip and private_ip:
-            result.add(
-                (
-                    _validate_private_ip(private_ip),
-                    _validate_public_association(public_ip),
-                    str(_get(association, "AllocationId", "allocationId"))
-                    if _get(association, "AllocationId", "allocationId")
-                    else None,
-                    str(_get(association, "AssociationId", "associationId"))
-                    if _get(association, "AssociationId", "associationId")
-                    else None,
-                )
-            )
+        normalized = _public_association(private_ip, association)
+        if normalized is not None:
+            result.add(normalized)
 
     top_association = _as_mapping(_get(value, "Association", "association", default={}))
-    top_public = _get(top_association, "PublicIp", "publicIp")
     top_private = _get(value, "PrivateIpAddress", "privateIpAddress")
-    if top_public and top_private:
-        result.add(
-            (
-                _validate_private_ip(top_private),
-                _validate_public_association(top_public),
-                str(_get(top_association, "AllocationId", "allocationId"))
-                if _get(top_association, "AllocationId", "allocationId")
-                else None,
-                str(_get(top_association, "AssociationId", "associationId"))
-                if _get(top_association, "AssociationId", "associationId")
-                else None,
-            )
-        )
+    normalized = _public_association(top_private, top_association)
+    if normalized is not None:
+        result.add(normalized)
     return tuple(sorted(result, key=lambda item: (item[0], item[1])))
 
 
@@ -337,6 +335,9 @@ class NormalizedTarget:
     source_event_id: str | None = None
     source_request_id: str | None = None
     source_event_time: datetime | None = None
+    observed_at: datetime | None = None
+    eni_observed_at: datetime | None = None
+    security_group_observed_at: tuple[tuple[str, datetime], ...] = ()
 
     def __post_init__(self) -> None:
         if not _ACCOUNT_RE.fullmatch(self.account_id):
@@ -351,6 +352,25 @@ class NormalizedTarget:
             raise ValueError("tags must be sorted")
         if not re.fullmatch(r"[0-9a-f]{64}", self.policy_fingerprint):
             raise ValueError("invalid policy fingerprint")
+        if self.observed_at is not None:
+            if self.observed_at.tzinfo is None:
+                raise ValueError("observed_at must be timezone aware")
+            object.__setattr__(self, "observed_at", self.observed_at.astimezone(UTC))
+        if self.eni_observed_at is not None:
+            if self.eni_observed_at.tzinfo is None:
+                raise ValueError("eni_observed_at must be timezone aware")
+            object.__setattr__(self, "eni_observed_at", self.eni_observed_at.astimezone(UTC))
+        if any(captured_at.tzinfo is None for _, captured_at in self.security_group_observed_at):
+            raise ValueError("security-group observation times must be timezone aware")
+        group_versions = tuple(
+            (group_id, captured_at.astimezone(UTC))
+            for group_id, captured_at in self.security_group_observed_at
+        )
+        if group_versions != tuple(sorted(group_versions)):
+            raise ValueError("security-group observation times must be sorted")
+        if any(group_id not in self.security_group_ids for group_id, _ in group_versions):
+            raise ValueError("security-group observation does not belong to the target")
+        object.__setattr__(self, "security_group_observed_at", group_versions)
 
     @property
     def target_id(self) -> str:
@@ -382,14 +402,60 @@ class NormalizedTarget:
         request_id: str | None,
         event_time: datetime | None,
         candidate_ports: CandidatePorts,
+        observed_at: datetime | None = None,
     ) -> NormalizedTarget:
-        return replace(
+        target = replace(
             self,
             source_event_name=event_name,
             source_event_id=event_id,
             source_request_id=request_id,
             source_event_time=event_time,
             candidate_ports=candidate_ports,
+            observed_at=observed_at if observed_at is not None else self.observed_at,
+        )
+        return target.with_observation(observed_at) if observed_at is not None else target
+
+    def with_observation(self, observed_at: datetime) -> NormalizedTarget:
+        """Attach the wall-clock time of an authoritative direct read."""
+
+        if observed_at.tzinfo is None:
+            raise ValueError("observed_at must be timezone aware")
+        return replace(self, observed_at=observed_at.astimezone(UTC))
+
+    def preserving_component_versions(self, previous: NormalizedTarget) -> NormalizedTarget:
+        """Carry comparable Config versions across an authoritative direct read."""
+
+        eni_state = (
+            self.public_ip,
+            self.instance_id,
+            self.lifecycle,
+            self.security_group_ids,
+            self.attachment_id,
+            self.allocation_id,
+            self.association_id,
+        )
+        previous_eni_state = (
+            previous.public_ip,
+            previous.instance_id,
+            previous.lifecycle,
+            previous.security_group_ids,
+            previous.attachment_id,
+            previous.allocation_id,
+            previous.association_id,
+        )
+        eni_observed_at = previous.eni_observed_at if eni_state == previous_eni_state else None
+        group_observations = (
+            previous.security_group_observed_at
+            if (
+                self.security_group_ids == previous.security_group_ids
+                and self.policy_fingerprint == previous.policy_fingerprint
+            )
+            else ()
+        )
+        return replace(
+            self,
+            eni_observed_at=eni_observed_at,
+            security_group_observed_at=group_observations,
         )
 
     def preserving_known_lifecycle(self, previous: NormalizedTarget) -> NormalizedTarget:
@@ -430,11 +496,49 @@ class NormalizedTarget:
             "allocation_id": self.allocation_id,
             "association_id": self.association_id,
             "tags": dict(self.tags),
+            "observed_at": (
+                self.observed_at.isoformat().replace("+00:00", "Z")
+                if self.observed_at is not None
+                else None
+            ),
+            "eni_observed_at": (
+                self.eni_observed_at.isoformat().replace("+00:00", "Z")
+                if self.eni_observed_at is not None
+                else None
+            ),
+            "security_group_observed_at": {
+                group_id: captured_at.isoformat().replace("+00:00", "Z")
+                for group_id, captured_at in self.security_group_observed_at
+            },
         }
 
     @classmethod
     def from_state_dict(cls, value: Mapping[str, Any]) -> NormalizedTarget:
         tags = value.get("tags") or {}
+        raw_observed_at = value.get("observed_at")
+        observed_at: datetime | None = None
+        if isinstance(raw_observed_at, datetime):
+            observed_at = raw_observed_at
+        elif isinstance(raw_observed_at, str) and raw_observed_at:
+            observed_at = datetime.fromisoformat(raw_observed_at.replace("Z", "+00:00"))
+        raw_eni_observed_at = value.get("eni_observed_at")
+        eni_observed_at: datetime | None = None
+        if isinstance(raw_eni_observed_at, datetime):
+            eni_observed_at = raw_eni_observed_at
+        elif isinstance(raw_eni_observed_at, str) and raw_eni_observed_at:
+            eni_observed_at = datetime.fromisoformat(raw_eni_observed_at.replace("Z", "+00:00"))
+        raw_group_observations = value.get("security_group_observed_at") or {}
+        if not isinstance(raw_group_observations, Mapping):
+            raise ValueError("invalid security-group observation versions")
+        group_observations = tuple(
+            sorted(
+                (
+                    str(group_id),
+                    datetime.fromisoformat(str(captured_at).replace("Z", "+00:00")),
+                )
+                for group_id, captured_at in raw_group_observations.items()
+            )
+        )
         return cls(
             account_id=str(value["account_id"]),
             region=str(value["region"]),
@@ -449,6 +553,9 @@ class NormalizedTarget:
             allocation_id=str(value["allocation_id"]) if value.get("allocation_id") else None,
             association_id=str(value["association_id"]) if value.get("association_id") else None,
             tags=tuple(sorted((str(key), str(item)) for key, item in tags.items())),
+            observed_at=observed_at,
+            eni_observed_at=eni_observed_at,
+            security_group_observed_at=group_observations,
         )
 
 
@@ -460,6 +567,9 @@ def normalize_network_interface(
     security_groups: Mapping[str, Sequence[Mapping[str, Any]]],
     allowed_tag_keys: Sequence[str] = (),
     instance_state: str | None = None,
+    observed_at: datetime | None = None,
+    eni_observed_at: datetime | None = None,
+    security_group_observed_at: tuple[tuple[str, datetime], ...] = (),
 ) -> tuple[NormalizedTarget, ...]:
     configuration = _as_mapping(_get(value, "configuration", "Configuration", default=value))
     eni_id = str(
@@ -472,6 +582,9 @@ def normalize_network_interface(
     )
     if not _ENI_RE.fullmatch(eni_id):
         raise ValueError("invalid network-interface identifier")
+    associations = _associations(configuration)
+    if not associations:
+        return ()
     groups = _group_ids(configuration)
     fingerprint = policy_fingerprint(security_groups, groups)
     attachment = _as_mapping(_get(configuration, "Attachment", "attachment", default={}))
@@ -494,6 +607,9 @@ def normalize_network_interface(
             allocation_id=allocation_id,
             association_id=association_id,
             tags=tags,
+            observed_at=observed_at,
+            eni_observed_at=eni_observed_at,
+            security_group_observed_at=security_group_observed_at,
         )
-        for private_ip, public_ip, allocation_id, association_id in _associations(configuration)
+        for private_ip, public_ip, allocation_id, association_id in associations
     )

@@ -21,9 +21,9 @@ variable "lambda_timeout_seconds" {
 }
 
 variable "queue_visibility_timeout_seconds" {
-  description = "Queue visibility timeout; must exceed the Lambda timeout."
+  description = "Queue visibility timeout; must be at least six times the Lambda timeout."
   type        = number
-  default     = 300
+  default     = 360
 
   validation {
     condition     = var.queue_visibility_timeout_seconds >= 1 && var.queue_visibility_timeout_seconds <= 43200
@@ -154,8 +154,8 @@ resource "terraform_data" "storage_validation" {
 
   lifecycle {
     precondition {
-      condition     = var.queue_visibility_timeout_seconds > var.lambda_timeout_seconds
-      error_message = "queue_visibility_timeout_seconds must exceed lambda_timeout_seconds."
+      condition     = var.queue_visibility_timeout_seconds >= 6 * var.lambda_timeout_seconds
+      error_message = "queue_visibility_timeout_seconds must be at least six times lambda_timeout_seconds."
     }
 
     precondition {

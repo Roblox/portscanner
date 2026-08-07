@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 UV ?= uv
+PYTHON ?= python3
 
 BASE_PYTHON_PATHS := contracts examples schemas tools
 OPTIONAL_PYTHON_COMPONENTS := \
@@ -13,10 +14,19 @@ OPTIONAL_PYTHON_COMPONENTS := \
 	scanner/nmap
 PYTHON_PATHS := $(BASE_PYTHON_PATHS) $(foreach path,$(OPTIONAL_PYTHON_COMPONENTS),$(if $(wildcard $(path)/pyproject.toml),$(path)))
 TEST_PATHS := $(foreach path,$(PYTHON_PATHS),$(wildcard $(path)/tests))
+RUNTIME_REQUIREMENTS := \
+	requirements-build.txt \
+	db/migrator/requirements-runtime.txt \
+	generator/requirements-runtime.txt \
+	inventory/requirements-runtime.txt \
+	parser/requirements-runtime.txt \
+	processor/requirements-runtime.txt \
+	scanner/nmap/requirements-runtime.txt
 
 .PHONY: \
 	sync format format-check lint typecheck test test-contracts \
-	generate check-generated licenses check test-go vet-go sanitize \
+	generate generate-runtime-requirements check-generated lock-check \
+	licenses check test-go vet-go sanitize \
 	secret-scan terraform-validate kubernetes-validate containers ci
 
 sync:
@@ -45,17 +55,24 @@ test:
 test-contracts:
 	$(UV) run --package portscanner-contracts pytest contracts/tests
 
-generate:
-	$(UV) run --package portscanner-contracts python schemas/generate.py
-	$(UV) run --package portscanner-contracts python examples/generate.py
+generate: generate-runtime-requirements
+	$(UV) run --frozen --package portscanner-contracts python schemas/generate.py
+	$(UV) run --frozen --package portscanner-contracts python examples/generate.py
 
-check-generated: generate
-	git diff --exit-code -- schemas/*.schema.json examples/*.json
+generate-runtime-requirements:
+	$(UV) run --frozen python tools/export_runtime_requirements.py
+
+check-generated: lock-check generate
+	git diff --exit-code -- schemas/*.schema.json examples/*.json $(RUNTIME_REQUIREMENTS)
+
+lock-check:
+	$(UV) lock --check
+	$(UV) run --frozen python tools/export_runtime_requirements.py --check
 
 licenses:
 	$(UV) run reuse lint
 
-check: format-check lint typecheck test check-generated licenses
+check: lock-check format-check lint typecheck test check-generated licenses
 
 test-go:
 	cd operator && go test ./...
@@ -76,12 +93,12 @@ kubernetes-validate:
 	kubectl kustomize operator/config/default >/dev/null
 
 containers:
-	docker build --file inventory/Dockerfile --tag portscanner-inventory:test .
-	docker build --file generator/Dockerfile --tag portscanner-generator:test .
-	docker build --file parser/Dockerfile --tag portscanner-parser:test .
-	docker build --file processor/Dockerfile --tag portscanner-processor:test .
-	docker build --file db/migrator/Dockerfile --tag portscanner-migrator:test .
-	docker build --file scanner/nmap/Dockerfile --tag portscanner-scanner:test .
-	docker build --file operator/Dockerfile --tag portscanner-operator:test operator
+	$(PYTHON) tools/build_tracked_image.py --dockerfile inventory/Dockerfile --tag portscanner-inventory:test
+	$(PYTHON) tools/build_tracked_image.py --dockerfile generator/Dockerfile --tag portscanner-generator:test
+	$(PYTHON) tools/build_tracked_image.py --dockerfile parser/Dockerfile --tag portscanner-parser:test
+	$(PYTHON) tools/build_tracked_image.py --dockerfile processor/Dockerfile --tag portscanner-processor:test
+	$(PYTHON) tools/build_tracked_image.py --dockerfile db/migrator/Dockerfile --tag portscanner-migrator:test
+	$(PYTHON) tools/build_tracked_image.py --dockerfile scanner/nmap/Dockerfile --tag portscanner-scanner:test
+	$(PYTHON) tools/build_tracked_image.py --dockerfile operator/Dockerfile --context operator --tag portscanner-operator:test
 
 ci: check test-go vet-go sanitize terraform-validate kubernetes-validate

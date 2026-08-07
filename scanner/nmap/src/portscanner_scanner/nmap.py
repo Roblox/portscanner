@@ -8,9 +8,11 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import time
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from threading import Event
 from typing import Protocol
 
 from .coverage import PortCoverage
@@ -26,6 +28,10 @@ MAX_HOST_TIMEOUT_SECONDS = 7_200
 MAX_PROCESS_TIMEOUT_SECONDS = 7_500
 MAX_SCRIPT_TIMEOUT_SECONDS = 300
 MAX_VERSION_INTENSITY = 7
+MIN_UPLOAD_RESERVE_SECONDS = 5
+MAX_UPLOAD_RESERVE_SECONDS = 300
+PROCESS_TERMINATION_GRACE_SECONDS = 5.0
+PROCESS_POLL_INTERVAL_SECONDS = 0.1
 
 KNOWN_SAFE_DEEP_SCRIPTS = frozenset(
     {
@@ -54,6 +60,10 @@ class NmapConfigurationError(ValueError):
     """Raised when Nmap tuning or script configuration is unsafe."""
 
 
+class NmapTerminationError(RuntimeError):
+    """Raised after a requested termination has stopped the Nmap child."""
+
+
 @dataclass(frozen=True)
 class NmapTuning:
     """Conservative, operator-controlled bounds for both Nmap phases."""
@@ -69,6 +79,7 @@ class NmapTuning:
     enrichment_process_timeout_seconds: int = 660
     script_timeout_seconds: int = 60
     version_intensity: int = 5
+    upload_reserve_seconds: int = 30
 
     def __post_init__(self) -> None:
         if not 1 <= self.min_rate <= MAX_MIN_RATE:
@@ -109,6 +120,10 @@ class NmapTuning:
             raise NmapConfigurationError("script_timeout_seconds must be between 1 and 300")
         if not 0 <= self.version_intensity <= MAX_VERSION_INTENSITY:
             raise NmapConfigurationError("version_intensity must be between 0 and 7")
+        if not (
+            MIN_UPLOAD_RESERVE_SECONDS <= self.upload_reserve_seconds <= MAX_UPLOAD_RESERVE_SECONDS
+        ):
+            raise NmapConfigurationError("upload_reserve_seconds must be between 5 and 300")
 
 
 def _split_script_names(values: Iterable[str]) -> set[str]:
@@ -172,7 +187,7 @@ def _base_scan_command(
         NMAP_BINARY,
         "-n",
         "-Pn",
-        "-sS",
+        "-sT",
         "--reason",
         "--max-retries",
         str(retries),
@@ -198,15 +213,20 @@ def build_discovery_command(
     coverage: PortCoverage,
     output_path: os.PathLike[str] | str,
     tuning: NmapTuning,
+    host_timeout_seconds: int | None = None,
 ) -> list[str]:
-    """Build the exact-coverage SYN discovery phase."""
+    """Build the exact-coverage TCP connect discovery phase."""
 
     return _base_scan_command(
         target=target,
         coverage=coverage,
         output_path=output_path,
         retries=tuning.discovery_retries,
-        host_timeout_seconds=tuning.discovery_host_timeout_seconds,
+        host_timeout_seconds=(
+            tuning.discovery_host_timeout_seconds
+            if host_timeout_seconds is None
+            else host_timeout_seconds
+        ),
         tuning=tuning,
     )
 
@@ -218,6 +238,7 @@ def build_enrichment_command(
     output_path: os.PathLike[str] | str,
     tuning: NmapTuning,
     scripts: Iterable[str] = (),
+    host_timeout_seconds: int | None = None,
 ) -> list[str]:
     """Build service enrichment limited to discovered-open TCP ports."""
 
@@ -227,7 +248,11 @@ def build_enrichment_command(
         coverage=coverage,
         output_path=output_path,
         retries=tuning.enrichment_retries,
-        host_timeout_seconds=tuning.enrichment_host_timeout_seconds,
+        host_timeout_seconds=(
+            tuning.enrichment_host_timeout_seconds
+            if host_timeout_seconds is None
+            else host_timeout_seconds
+        ),
         tuning=tuning,
     )
     target_argument = command.pop()
@@ -289,14 +314,62 @@ class Runner(Protocol):
 class SubprocessRunner:
     """Execute Nmap without a shell or inherited input/output streams."""
 
+    def __init__(
+        self,
+        *,
+        termination_event: Event | None = None,
+        terminate_grace_seconds: float = PROCESS_TERMINATION_GRACE_SECONDS,
+        poll_interval_seconds: float = PROCESS_POLL_INTERVAL_SECONDS,
+    ) -> None:
+        if terminate_grace_seconds <= 0 or poll_interval_seconds <= 0:
+            raise ValueError("process termination timing must be positive")
+        self._termination_event = termination_event
+        self._terminate_grace_seconds = terminate_grace_seconds
+        self._poll_interval_seconds = poll_interval_seconds
+
+    def termination_requested(self) -> bool:
+        return self._termination_event is not None and self._termination_event.is_set()
+
+    def _stop_process(self, process: subprocess.Popen[bytes]) -> None:
+        if process.poll() is not None:
+            return
+        try:
+            process.terminate()
+        except ProcessLookupError:
+            return
+        try:
+            process.wait(timeout=self._terminate_grace_seconds)
+        except subprocess.TimeoutExpired:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                return
+            process.wait()
+
     def run(self, command: Sequence[str], *, timeout_seconds: int) -> ProcessResult:
-        completed = subprocess.run(  # noqa: S603 - argv is fully constructed above.
+        if timeout_seconds < 1:
+            raise ValueError("process timeout must be positive")
+        process = subprocess.Popen(  # noqa: S603 - argv is fully constructed above.
             list(command),
-            check=False,
             shell=False,
-            timeout=timeout_seconds,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        return ProcessResult(returncode=completed.returncode)
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            if self.termination_requested():
+                self._stop_process(process)
+                raise NmapTerminationError("scan termination was requested")
+            returncode = process.poll()
+            if returncode is not None:
+                return ProcessResult(returncode=returncode)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self._stop_process(process)
+                raise subprocess.TimeoutExpired(list(command), timeout_seconds)
+            wait_for = min(self._poll_interval_seconds, remaining)
+            if self._termination_event is None:
+                time.sleep(wait_for)
+            else:
+                self._termination_event.wait(wait_for)

@@ -31,7 +31,7 @@ variable "enable_event_dispatch" {
 }
 
 variable "config_mode" {
-  description = "create builds a clean single-account recorder/delivery/aggregator, existing accepts an aggregator, and disabled omits Config."
+  description = "create builds a recorder and explicitly current-region aggregator, existing accepts an aggregator, and disabled omits Config."
   type        = string
   default     = "create"
 
@@ -190,6 +190,7 @@ locals {
     var.config_aggregator_account_ids :
     toset([data.aws_caller_identity.current.account_id])
   ))
+  recorded_config_regions = [data.aws_region.current.region]
 }
 
 resource "terraform_data" "signal_validation" {
@@ -197,7 +198,7 @@ resource "terraform_data" "signal_validation" {
 
   lifecycle {
     precondition {
-      condition     = var.config_mode != "existing" || (var.existing_config_aggregator_name != null && length(var.existing_config_aggregator_name) > 0)
+      condition     = var.config_mode != "existing" ? true : try(length(var.existing_config_aggregator_name) > 0, false)
       error_message = "existing_config_aggregator_name is required when config_mode is existing."
     }
 
@@ -276,6 +277,13 @@ resource "aws_config_configuration_recorder_status" "this" {
   depends_on = [aws_config_delivery_channel.this]
 }
 
+resource "aws_config_aggregate_authorization" "self" {
+  count = var.config_mode == "create" ? 1 : 0
+
+  account_id            = data.aws_caller_identity.current.account_id
+  authorized_aws_region = data.aws_region.current.region
+}
+
 resource "aws_config_configuration_aggregator" "this" {
   count = var.config_mode == "create" ? 1 : 0
 
@@ -283,8 +291,11 @@ resource "aws_config_configuration_aggregator" "this" {
 
   account_aggregation_source {
     account_ids = local.aggregator_account_ids
-    all_regions = true
+    all_regions = false
+    regions     = local.recorded_config_regions
   }
+
+  depends_on = [aws_config_aggregate_authorization.self]
 }
 
 resource "aws_cloudtrail" "management" {
@@ -392,7 +403,7 @@ resource "aws_cloudwatch_event_rule" "local" {
   for_each = local.local_event_patterns
 
   name          = local.local_rule_names[each.key]
-  description   = "Supported local EC2 ${each.key} inventory hints"
+  description   = "Supported ${data.aws_region.current.region} local EC2 ${each.key} inventory hints"
   event_pattern = jsonencode(each.value)
   state         = var.enable_event_dispatch ? "ENABLED" : "DISABLED"
 }
@@ -415,7 +426,7 @@ resource "aws_cloudwatch_event_rule" "central" {
   }
 
   name           = local.central_rule_names[each.key]
-  description    = "Supported member EC2 ${each.key} inventory hints"
+  description    = "Supported member EC2 ${each.key} inventory hints delivered to ${data.aws_region.current.region}"
   event_bus_name = aws_cloudwatch_event_bus.central[0].name
   event_pattern = jsonencode(merge(each.value, {
     account = local.signal_account_ids
@@ -460,4 +471,14 @@ output "signal_rule_arns" {
     values(aws_cloudwatch_event_rule.local)[*].arn,
     values(aws_cloudwatch_event_rule.central)[*].arn
   )
+}
+
+output "signal_region" {
+  description = "Region containing the local rules and central event bus; local hot-path signals cover only this region."
+  value       = data.aws_region.current.region
+}
+
+output "created_config_source_regions" {
+  description = "Explicit source regions included by a created aggregator. Empty when Config is existing or disabled."
+  value       = var.config_mode == "create" ? local.recorded_config_regions : []
 }

@@ -27,7 +27,7 @@ is intentionally unsupported.
 
 ## Profiles
 
-- `fast-full-tcp` performs bounded SYN discovery for TCP ports `1-65535`, then
+- `fast-full-tcp` performs bounded TCP connect discovery for ports `1-65535`, then
   service/version enrichment only for ports discovery explicitly reported open.
   An operator may redundantly declare only `1-65535`.
 - `targeted-tcp` requires `--ports` (alias `--tcp-ports`) and discovers exactly the normalized
@@ -37,7 +37,8 @@ is intentionally unsupported.
 
 Port declarations are decimal ports or inclusive ranges separated by commas.
 The worker sorts and merges duplicate, adjacent, and overlapping declarations.
-For example, `443,80-82,81-90` declares `80-90,443`.
+For example, `443,80-82,81-90` declares `80-90,443`. The normalized result is
+limited to 256 terms, matching the shared result envelope.
 
 The compiled safe-script catalog is:
 
@@ -72,6 +73,8 @@ Supply these as CLI fields or their named environment variables:
 - `--target-resource-id` / `TARGET_RESOURCE_ID`
 - `--target-private-address` / `TARGET_PRIVATE_ADDRESS`
 - `--target-generation` / `TARGET_GENERATION`
+- `--deadline-at` / `SCAN_DEADLINE_AT`
+- `--not-after` / `SCAN_NOT_AFTER`
 - `--image-version` / `SCANNER_IMAGE_VERSION`
 - `--s3-bucket` / `RESULTS_BUCKET`
 - `--s3-prefix` / `RESULTS_PREFIX`
@@ -80,6 +83,14 @@ Equivalent `PORTSCANNER_*` environment names are accepted for operator
 integration. The optional compatibility fields `--scan-mode` and
 `--service-detection` are validated against the selected profile; they cannot
 enable a different or unbounded scan behavior.
+
+`deadline-at` is generator dispatch metadata and does not stop an already
+dispatched scan. `not-after` is the absolute execution cutoff. Before each Nmap
+phase, the worker derives the remaining wall-clock budget, reserves 30 seconds
+by default for result publication, and clamps both Nmap host and process
+timeouts. It fails without starting a phase when less than a usable phase
+budget remains. Configure the bounded reserve with
+`SCANNER_UPLOAD_RESERVE_SECONDS`.
 
 `SCANNER_IMAGE_VERSION` must be an immutable OCI `sha256` digest (optionally
 prefixed by an image reference and `@`) or an immutable `git:<revision>` value.
@@ -145,6 +156,11 @@ A process timeout, nonzero exit, malformed XML, omitted coverage, or incomplete
 enrichment produces a nonzero worker exit. Any retained non-open observation is
 `UNKNOWN`; partial output never proves that a port is closed.
 
+If discovery and enrichment report different open-port sets, the worker exits
+nonzero and publishes a partial envelope without an enrichment artifact
+reference. The parser marks observations from that attempt `UNKNOWN`, so the
+attempt can be retained without asserting a conflicting state change.
+
 Raw discovery XML is conditionally uploaded first. Enrichment XML, when
 present, is uploaded next. Only then is an immutable shared-contract
 `ScanResultEnvelope`, containing its normalized `ScanResult`, conditionally
@@ -161,7 +177,9 @@ Each raw artifact has a SHA-256 in the envelope. Every S3 write uses
 object-scoped conditional `PutObject` access for its configured prefix. It does
 not need bucket-wide list or delete permission. On scan failure it best-effort
 uploads available raw XML first and then a failed/partial envelope before
-exiting nonzero.
+exiting nonzero. `SIGTERM`/`SIGINT` requests bounded Nmap child termination and
+the same best-effort failure publication. Publication is not guaranteed after
+the container runtime sends `SIGKILL`.
 
 Consumers must treat the envelope as the authoritative source for event,
 trace, run, attempt, target-generation, profile, and coverage fields. The
@@ -171,10 +189,11 @@ ignores correlation-like XML attributes.
 
 ## Container runtime
 
-The Dockerfile uses a pinned Debian snapshot and exact Nmap package version,
-runs as a non-root user, and keeps `/tmp` writable. It intentionally does not
-grant Linux capabilities in the image. Kubernetes must grant `NET_RAW`
-externally for Nmap SYN scans:
+The Dockerfile uses a digest-pinned Python base, dated Debian snapshot, and exact
+distribution Nmap version; release automation records and scans the resulting immutable
+image digest. It runs as a non-root user and keeps `/tmp` writable. TCP connect scanning
+does not require raw sockets, so neither the image nor Kubernetes grants Linux
+capabilities:
 
 ```yaml
 securityContext:
@@ -182,7 +201,6 @@ securityContext:
   allowPrivilegeEscalation: false
   capabilities:
     drop: ["ALL"]
-    add: ["NET_RAW"]
 ```
 
 No account, bucket, registry, or target is embedded in the image.

@@ -40,21 +40,20 @@ def test_runs_full_reconciliation_and_flushes_handoffs(
         def __init__(self, _s3: object, _repository: object) -> None:
             pass
 
-    publish_calls = 0
+    publish_calls: list[tuple[None, int]] = []
 
-    def publish_pending(
+    def publish_all(
         self: object,
         *,
-        keys: tuple[str, ...],
-        limit: int,
+        keys: None,
+        page_size: int,
     ) -> int:
-        nonlocal publish_calls
-        assert keys == ("current-handoff-1", "current-handoff-2")
-        publish_calls += 1
-        return 2 if publish_calls == 1 else 0
+        publish_calls.append((keys, page_size))
+        return 5
 
-    FakePublisher.publish_pending = publish_pending  # type: ignore[method-assign]
+    FakePublisher.publish_all = publish_all  # type: ignore[method-assign]
     monkeypatch.setenv("FINDING_BUCKET", "finding-test-bucket")
+    monkeypatch.setenv("HANDOFF_PAGE_SIZE", "2")
     monkeypatch.setattr(handler, "database_dsn", lambda: "unused")
     monkeypatch.setattr(handler.psycopg, "connect", lambda _dsn: _ConnectionContext())
     monkeypatch.setattr(handler.boto3, "client", lambda _name: object())
@@ -65,5 +64,5 @@ def test_runs_full_reconciliation_and_flushes_handoffs(
 
     assert calls == [("scheduled-run-1", "finding-test-bucket")]
     assert result["findings_examined"] == 3
-    assert result["objects_published"] == 2
-    assert publish_calls == 1
+    assert result["objects_published"] == 5
+    assert publish_calls == [(None, 2)]

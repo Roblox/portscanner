@@ -14,9 +14,17 @@ PUBLIC_IP = "198.51.100.10"
 
 
 class AwsError(Exception):
-    def __init__(self, code: str) -> None:
+    def __init__(
+        self,
+        code: str,
+        cancellation_reasons: list[str] | None = None,
+    ) -> None:
         super().__init__(code)
         self.response = {"Error": {"Code": code}}
+        if cancellation_reasons is not None:
+            self.response["CancellationReasons"] = [
+                {"Code": reason} for reason in cancellation_reasons
+            ]
 
 
 def permission(
@@ -115,6 +123,7 @@ class FakeDynamo:
         self.items: dict[tuple[str, str], dict[str, Any]] = {}
         self.transactions = 0
         self.fail_transactions = 0
+        self.transaction_errors: list[str] = []
 
     @staticmethod
     def _key(item: dict[str, Any]) -> tuple[str, str]:
@@ -129,9 +138,15 @@ class FakeDynamo:
 
     def transact_write_items(self, *, TransactItems: list[dict[str, Any]], **_kwargs: Any) -> None:
         self.transactions += 1
+        if self.transaction_errors:
+            code = self.transaction_errors.pop(0)
+            raise AwsError("TransactionCanceledException", [code])
         if self.fail_transactions:
             self.fail_transactions -= 1
-            raise AwsError("TransactionCanceledException")
+            raise AwsError(
+                "TransactionCanceledException",
+                ["ConditionalCheckFailed"],
+            )
         for operation in TransactItems:
             if "ConditionCheck" in operation:
                 check = operation["ConditionCheck"]
@@ -142,7 +157,10 @@ class FakeDynamo:
                     or existing["generation"]["N"] != values[":expected"]["N"]
                     or existing["status"]["S"] != values[":active"]["S"]
                 ):
-                    raise AwsError("TransactionCanceledException")
+                    raise AwsError(
+                        "TransactionCanceledException",
+                        ["ConditionalCheckFailed", "None"],
+                    )
                 continue
             put = operation["Put"]
             item = put["Item"]
@@ -150,7 +168,10 @@ class FakeDynamo:
             existing = self.items.get(key)
             condition = put.get("ConditionExpression", "")
             if condition == "attribute_not_exists(pk)" and existing is not None:
-                raise AwsError("TransactionCanceledException")
+                raise AwsError(
+                    "TransactionCanceledException",
+                    ["ConditionalCheckFailed"],
+                )
             if condition.startswith("#generation"):
                 values = put["ExpressionAttributeValues"]
                 expected_generation = values[":expected"]["N"]
@@ -159,8 +180,22 @@ class FakeDynamo:
                     existing is None
                     or existing["generation"]["N"] != expected_generation
                     or existing["status"]["S"] != expected_status
+                    or (
+                        ":expected_observed_at" in values
+                        and "observed_at" in existing
+                        and existing["observed_at"]["S"] != values[":expected_observed_at"]["S"]
+                    )
+                    or (
+                        ":expected_observation_version" in values
+                        and "observation_version" in existing
+                        and existing["observation_version"]["S"]
+                        != values[":expected_observation_version"]["S"]
+                    )
                 ):
-                    raise AwsError("TransactionCanceledException")
+                    raise AwsError(
+                        "TransactionCanceledException",
+                        ["ConditionalCheckFailed"],
+                    )
         for operation in TransactItems:
             if "Put" not in operation:
                 continue

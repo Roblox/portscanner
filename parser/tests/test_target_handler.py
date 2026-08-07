@@ -106,7 +106,10 @@ def _shared_event(event_type: str = "target.upsert") -> SimpleNamespace:
     if event_type == "target.removed":
         values["removed_at"] = NOW + timedelta(seconds=3)
     else:
-        values["scan"] = SimpleNamespace(requested_at=NOW + timedelta(seconds=3))
+        values["scan"] = SimpleNamespace(
+            requested_at=NOW + timedelta(seconds=3),
+            reason="new_target",
+        )
     return SimpleNamespace(**values)
 
 
@@ -191,6 +194,7 @@ def test_maps_work_and_removal_without_leaking_unapproved_context() -> None:
     assert work.provider_target_id == "us-west-2/eni-0123456789abcdef0/10.0.0.10"
     assert work.addresses == ("192.0.2.10",)
     assert work.generation == 7
+    assert work.scan_reason == "new_target"
     assert work.source_event_time == NOW
     assert work.source_observed_at == NOW + timedelta(seconds=1)
     assert work.source_collected_at == NOW + timedelta(seconds=2)
@@ -219,6 +223,7 @@ def test_maps_work_and_removal_without_leaking_unapproved_context() -> None:
     removal = target_handler._local_target_event(_shared_event("target.removed"))
     assert removal.event_type == "remove"
     assert removal.addresses == ()
+    assert removal.scan_reason is None
     assert removal.removed_at == NOW + timedelta(seconds=3)
     assert removal.source_observed_at == NOW + timedelta(seconds=1)
 
@@ -284,9 +289,9 @@ def test_processes_removal_and_retries_pending_handoffs(
         def __init__(self, _s3: object, _repository: object) -> None:
             pass
 
-        def publish_pending(self, *, keys: tuple[str, ...], limit: int) -> int:
-            publish_calls.append((keys, limit))
-            return 1 if len(publish_calls) == 1 else 0
+        def publish_all(self, *, keys: tuple[str, ...], page_size: int = 1000) -> int:
+            publish_calls.append((keys, page_size))
+            return len(keys)
 
     monkeypatch.setattr(target_handler, "parse_target_event", lambda _document: event)
     monkeypatch.setattr(target_handler.psycopg, "connect", lambda _dsn: ConnectionContext())
@@ -306,7 +311,7 @@ def test_processes_removal_and_retries_pending_handoffs(
 
     assert applied[0][0].event_type == "remove"
     assert applied[0][1] == "finding-test"
-    assert publish_calls == [(("handoff-1",), 1), (("handoff-1",), 1)]
+    assert publish_calls == [(("handoff-1",), 1000)]
 
 
 def test_lambda_returns_only_retryable_batch_failures(

@@ -37,6 +37,15 @@ def test_invalid_coverage_is_rejected(coverage):
         PortCoverage.parse(coverage)
 
 
+def test_normalized_coverage_is_limited_to_shared_envelope_bound():
+    adjacent = ",".join(str(port) for port in range(1, 258))
+    assert PortCoverage.parse(adjacent).as_strings() == ("1-257",)
+
+    disjoint = ",".join(str(port) for port in range(1, 515, 2))
+    with pytest.raises(CoverageError, match="normalized"):
+        PortCoverage.parse(disjoint)
+
+
 def test_discovery_command_is_bounded_single_target_argv(tmp_path):
     output = tmp_path / "discovery.xml"
     tuning = NmapTuning()
@@ -48,6 +57,9 @@ def test_discovery_command_is_bounded_single_target_argv(tmp_path):
     )
 
     assert command[0] == "nmap"
+    assert "-sT" in command
+    assert "-sS" not in command
+    assert "--privileged" not in command
     assert command.count("target-input") == 1
     assert command[-1] == "target-input"
     assert command[command.index("-p") + 1] == "1-65535"
@@ -81,6 +93,9 @@ def test_enrichment_is_limited_to_sorted_discovered_ports_and_safe_scripts(tmp_p
     assert command[command.index("--script") + 1] == "banner,ssl-cert"
     assert "--script-args" not in command
     assert "-sV" in command
+    assert "-sT" in command
+    assert "-sS" not in command
+    assert "--privileged" not in command
 
 
 def test_deep_scripts_must_be_in_configured_compiled_allowlist():

@@ -24,6 +24,7 @@ const (
 	fullTCPPortCoverage = "1-65535"
 	jobNameHashLength   = 10
 	maxContractText     = 256
+	maxCoverageTerms    = 256
 )
 
 var (
@@ -177,32 +178,36 @@ func deterministicJobName(scanner *scanningv1alpha1.Scanner) string {
 	return prefix + base + "-" + suffix
 }
 
-func effectiveDeadline(spec scanningv1alpha1.ScannerSpec) (time.Time, error) {
+func scanDeadlines(spec scanningv1alpha1.ScannerSpec) (time.Time, time.Time, error) {
 	if spec.Deadline.IsZero() {
-		return time.Time{}, fmt.Errorf("deadline must be set")
+		return time.Time{}, time.Time{}, fmt.Errorf("deadline must be set")
 	}
 	if spec.NotAfter.IsZero() {
-		return time.Time{}, fmt.Errorf("notAfter must be set")
+		return time.Time{}, time.Time{}, fmt.Errorf("notAfter must be set")
 	}
 	deadline := spec.Deadline.Time
-	if spec.NotAfter.Time.Before(deadline) {
-		deadline = spec.NotAfter.Time
+	notAfter := spec.NotAfter.Time
+	if deadline.After(notAfter) {
+		return time.Time{}, time.Time{}, fmt.Errorf("deadline must not be later than notAfter")
 	}
-	return deadline, nil
+	return deadline, notAfter, nil
 }
 
 func activeDeadlineSeconds(spec scanningv1alpha1.ScannerSpec, now time.Time) (int64, error) {
-	deadline, err := effectiveDeadline(spec)
+	_, notAfter, err := scanDeadlines(spec)
 	if err != nil {
 		return 0, err
 	}
-	remaining := deadline.Sub(now)
+	remaining := notAfter.Sub(now)
 	if remaining <= 0 {
-		return 0, fmt.Errorf("scan request expired at %s", deadline.UTC().Format(time.RFC3339))
+		return 0, fmt.Errorf("scan execution cutoff elapsed at %s", notAfter.UTC().Format(time.RFC3339))
 	}
-	seconds := int64((remaining + time.Second - 1) / time.Second)
+	seconds := int64(remaining / time.Second)
 	if seconds < 1 {
-		seconds = 1
+		return 0, fmt.Errorf(
+			"less than one second remains before scan execution cutoff at %s",
+			notAfter.UTC().Format(time.RFC3339),
+		)
 	}
 	return seconds, nil
 }
@@ -253,6 +258,13 @@ func explicitPortCoverage(spec scanningv1alpha1.ScannerSpec) (string, error) {
 			parts = append(parts, fmt.Sprintf("%d-%d", selected[start], selected[end]))
 		}
 		start = end + 1
+	}
+	if len(parts) > maxCoverageTerms {
+		return "", fmt.Errorf(
+			"normalized TCP port coverage contains %d terms; maximum is %d",
+			len(parts),
+			maxCoverageTerms,
+		)
 	}
 	return strings.Join(parts, ","), nil
 }
@@ -325,6 +337,7 @@ func validateScannerSpec(spec scanningv1alpha1.ScannerSpec) error {
 	}
 	switch spec.Reason {
 	case scanningv1alpha1.ReasonNewTarget,
+		scanningv1alpha1.ReasonTargetChange,
 		scanningv1alpha1.ReasonPolicyChange,
 		scanningv1alpha1.ReasonCoverage,
 		scanningv1alpha1.ReasonManual:
@@ -333,6 +346,13 @@ func validateScannerSpec(spec scanningv1alpha1.ScannerSpec) error {
 	}
 	if spec.Priority < 0 || spec.Priority > 1000 {
 		return fmt.Errorf("priority must be between 0 and 1000")
+	}
+	if len(spec.Ports)+len(spec.Ranges) > maxCoverageTerms {
+		return fmt.Errorf(
+			"combined TCP port and range coverage contains %d terms; maximum is %d",
+			len(spec.Ports)+len(spec.Ranges),
+			maxCoverageTerms,
+		)
 	}
 	if spec.RetryLimit < 0 || spec.RetryLimit > 6 {
 		return fmt.Errorf("retryLimit must be between 0 and 6")
@@ -346,10 +366,7 @@ func validateScannerSpec(spec scanningv1alpha1.ScannerSpec) error {
 	if spec.SourceTimestamps.EventAt.After(spec.SourceTimestamps.ObservedAt.Time) {
 		return fmt.Errorf("source eventAt must not be later than observedAt")
 	}
-	if !spec.Deadline.IsZero() && !spec.NotAfter.IsZero() && spec.Deadline.After(spec.NotAfter.Time) {
-		return fmt.Errorf("deadline must not be later than notAfter")
-	}
-	_, err := effectiveDeadline(spec)
+	_, _, err := scanDeadlines(spec)
 	return err
 }
 
@@ -449,6 +466,8 @@ func buildJob(scanner *scanningv1alpha1.Scanner, config JobConfig, now time.Time
 		{Name: "PORTSCANNER_IMAGE_VERSION", Value: config.ScannerImage},
 		{Name: "PORTSCANNER_SOURCE_EVENT_AT", Value: scanner.Spec.SourceTimestamps.EventAt.UTC().Format(time.RFC3339Nano)},
 		{Name: "PORTSCANNER_SOURCE_OBSERVED_AT", Value: scanner.Spec.SourceTimestamps.ObservedAt.UTC().Format(time.RFC3339Nano)},
+		{Name: "PORTSCANNER_DEADLINE_AT", Value: scanner.Spec.Deadline.UTC().Format(time.RFC3339Nano)},
+		{Name: "PORTSCANNER_NOT_AFTER", Value: scanner.Spec.NotAfter.UTC().Format(time.RFC3339Nano)},
 		{Name: "PORTSCANNER_RESULT_BUCKET", Value: config.ResultBucket},
 		{Name: "PORTSCANNER_RESULT_PREFIX", Value: config.ResultPrefix},
 		{Name: "PORTSCANNER_RESOURCE_NAME", Value: scanner.Name},
@@ -523,7 +542,6 @@ func buildJob(scanner *scanningv1alpha1.Scanner, config JobConfig, now time.Time
 							ReadOnlyRootFilesystem:   &readOnlyRootFilesystem,
 							Capabilities: &corev1.Capabilities{
 								Drop: []corev1.Capability{"ALL"},
-								Add:  []corev1.Capability{"NET_RAW"},
 							},
 						},
 						VolumeMounts: []corev1.VolumeMount{{

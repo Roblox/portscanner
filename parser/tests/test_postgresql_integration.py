@@ -81,6 +81,7 @@ def _target_event(
     address: str = "192.0.2.10",
     event_type: str = "upsert",
     minute: int = 0,
+    scan_reason: str | None = "target_change",
 ) -> TargetEvent:
     return TargetEvent(
         event_id=event_id,
@@ -91,9 +92,10 @@ def _target_event(
         provider_scope_id="scope-example-1",
         provider_target_id="resource-example-1",
         location="region-example-1",
-        addresses=(address,),
+        addresses=() if event_type == "remove" else (address,),
         context={"environment": "test"},
         source_observed_at=BASE_TIME + timedelta(minutes=minute),
+        scan_reason=None if event_type == "remove" else scan_reason,
     )
 
 
@@ -212,6 +214,7 @@ def _ingest(
         raw_result_version=None,
         enrichment_result_version=None,
         finding_bucket=FINDING_BUCKET,
+        xml_completion_validated=envelope.outcome == "complete",
     )
 
 
@@ -253,7 +256,8 @@ def test_duplicate_stale_generation_and_reassigned_address(
             generation=2,
             address="192.0.2.20",
             minute=2,
-        )
+        ),
+        finding_bucket=FINDING_BUCKET,
     )
     stale = _ingest(
         repository,
@@ -323,6 +327,32 @@ def test_targeted_full_partial_timeout_and_explicit_closure(
         ),
         [],
     )
+    partial_attempt = connection.execute(
+        """
+        SELECT
+            attempt.outcome,
+            attempt.xml_completion_validated,
+            attempt.raw_result_key,
+            attempt.raw_result_sha256,
+            count(observation.observation_id) AS observation_count
+        FROM act.scan_attempts AS attempt
+        LEFT JOIN act.observations AS observation
+          ON observation.attempt_id = attempt.attempt_id
+        WHERE attempt.attempt_id = 'attempt-partial'
+        GROUP BY
+            attempt.outcome,
+            attempt.xml_completion_validated,
+            attempt.raw_result_key,
+            attempt.raw_result_sha256
+        """
+    ).fetchone()
+    assert partial_attempt == {
+        "outcome": "partial",
+        "xml_completion_validated": False,
+        "raw_result_key": "raw/attempt-partial.xml",
+        "raw_result_sha256": hashlib.sha256(b"attempt-partial").hexdigest(),
+        "observation_count": 0,
+    }
     _ingest(
         repository,
         _envelope(
@@ -369,6 +399,285 @@ def test_targeted_full_partial_timeout_and_explicit_closure(
         )
         == "coverage_absence"
     )
+
+
+def test_scan_attempt_reordering_uses_timestamp_and_attempt_id_watermarks(
+    repository: Repository,
+    connection: Any,
+) -> None:
+    repository.apply_target_event(_target_event("target-upsert-reordering"))
+    _ingest(
+        repository,
+        _envelope("baseline-open"),
+        [_observation(100), _observation(101)],
+    )
+
+    _ingest(
+        repository,
+        _envelope("z-equal-winner-100", coverage=_coverage("100"), minute=5),
+        [_observation(100, state="closed", minute=5)],
+    )
+    _ingest(
+        repository,
+        _envelope("a-equal-loser-100", coverage=_coverage("100"), minute=5),
+        [_observation(100, minute=5)],
+    )
+
+    _ingest(
+        repository,
+        _envelope("a-equal-loser-101", coverage=_coverage("101"), minute=5),
+        [_observation(101, minute=5)],
+    )
+    _ingest(
+        repository,
+        _envelope("z-equal-winner-101", coverage=_coverage("101"), minute=5),
+        [_observation(101, state="closed", minute=5)],
+    )
+
+    rows = connection.execute(
+        """
+        SELECT port, state, last_attempt_id
+        FROM act.exposure_state
+        WHERE target_id = %s AND port IN (100, 101)
+        ORDER BY port
+        """,
+        (TARGET_ID,),
+    ).fetchall()
+    assert rows == [
+        {"port": 100, "state": "closed", "last_attempt_id": "z-equal-winner-100"},
+        {"port": 101, "state": "closed", "last_attempt_id": "z-equal-winner-101"},
+    ]
+    assert _scalar(connection, "SELECT count(*) FROM act.scan_attempts") == 5
+
+
+def test_address_binding_change_closes_old_address_and_publishes_history(
+    repository: Repository,
+    connection: Any,
+) -> None:
+    repository.apply_target_event(_target_event("target-upsert-old-address"))
+    _ingest(
+        repository,
+        _envelope("attempt-old-address", minute=5),
+        [_observation(22, minute=5)],
+    )
+
+    repository.apply_target_event(
+        _target_event(
+            "target-address-changed",
+            generation=2,
+            address="192.0.2.20",
+            minute=2,
+        ),
+        finding_bucket=FINDING_BUCKET,
+    )
+
+    exposure = connection.execute(
+        """
+        SELECT state, closure_reason, last_changed_at, last_confirmed_at
+        FROM act.exposure_state
+        WHERE target_id = %s AND protocol = 'tcp' AND port = 22
+        """,
+        (TARGET_ID,),
+    ).fetchone()
+    assert exposure["state"] == "closed"
+    assert exposure["closure_reason"] == "address_binding_changed"
+    assert exposure["last_changed_at"] >= BASE_TIME + timedelta(minutes=5, seconds=10)
+    assert exposure["last_confirmed_at"] == exposure["last_changed_at"]
+    assert _scalar(
+        connection,
+        "SELECT array_agg(DISTINCT resolution_reason) FROM act.findings",
+    ) == ["exposure_closed"]
+    assert (
+        _scalar(
+            connection,
+            """
+            SELECT count(*)
+            FROM act.finding_handoffs AS handoff
+            JOIN act.finding_events AS event
+              ON event.event_key = handoff.finding_event_key
+            WHERE event.source_kind = 'target_event'
+              AND event.source_key = 'target-address-changed'
+              AND event.event_type = 'resolved'
+            """,
+        )
+        == 2
+    )
+
+    migrator = Migrator(
+        connection,
+        discover_migrations(REPOSITORY_ROOT / "db" / "migrations"),
+    )
+    assert migrator.down(target="000004", steps=None) == ["000005"]
+    assert (
+        _scalar(
+            connection,
+            """
+        SELECT closure_reason
+        FROM act.exposure_state
+        WHERE target_id = %s AND protocol = 'tcp' AND port = 22
+        """,
+            (TARGET_ID,),
+        )
+        == "address_binding_changed"
+    )
+    assert migrator.up() == ["000005"]
+
+    _ingest(
+        repository,
+        _envelope(
+            "attempt-new-address",
+            generation=2,
+            address="192.0.2.20",
+            minute=6,
+        ),
+        [_observation(22, address="192.0.2.20", minute=6)],
+    )
+    assert _state(connection, 22) == "open"
+    assert _scalar(connection, "SELECT count(*) FROM act.exposure_events") >= 3
+
+
+def test_generation_gap_reactivation_closes_prior_state_at_unchanged_address(
+    repository: Repository,
+    connection: Any,
+) -> None:
+    repository.apply_target_event(_target_event("target-before-generation-gap"))
+    _ingest(
+        repository,
+        _envelope("attempt-before-generation-gap"),
+        [_observation(22)],
+    )
+
+    repository.apply_target_event(
+        _target_event(
+            "target-after-generation-gap",
+            generation=3,
+            minute=3,
+            scan_reason="new_target",
+        ),
+        finding_bucket=FINDING_BUCKET,
+    )
+
+    assert connection.execute(
+        """
+        SELECT state, closure_reason, last_generation
+        FROM act.exposure_state
+        WHERE target_id = %s AND protocol = 'tcp' AND port = 22
+        """,
+        (TARGET_ID,),
+    ).fetchone() == {
+        "state": "closed",
+        "closure_reason": "generation_gap_reactivation",
+        "last_generation": 3,
+    }
+    assert _scalar(
+        connection,
+        "SELECT array_agg(DISTINCT status) FROM act.findings",
+    ) == ["resolved"]
+
+    repository.apply_target_event(
+        _target_event(
+            "missed-removal-arrived-late",
+            generation=2,
+            event_type="remove",
+            minute=2,
+        ),
+        finding_bucket=FINDING_BUCKET,
+    )
+    assert connection.execute(
+        """
+        SELECT status, current_generation, host(current_addresses[1]) AS current_address
+        FROM act.targets
+        WHERE target_id = %s
+        """,
+        (TARGET_ID,),
+    ).fetchone() == {
+        "status": "active",
+        "current_generation": 3,
+        "current_address": "192.0.2.10",
+    }
+
+
+@pytest.mark.parametrize("scan_reason", ["target_change", "policy_change"])
+def test_non_reactivation_generation_gap_preserves_current_state(
+    repository: Repository,
+    connection: Any,
+    scan_reason: str,
+) -> None:
+    repository.apply_target_event(_target_event("target-before-nonreactivation-gap"))
+    _ingest(
+        repository,
+        _envelope("attempt-before-nonreactivation-gap"),
+        [_observation(22)],
+    )
+
+    repository.apply_target_event(
+        _target_event(
+            f"target-after-{scan_reason}-gap",
+            generation=3,
+            minute=3,
+            scan_reason=scan_reason,
+        ),
+        finding_bucket=FINDING_BUCKET,
+    )
+
+    assert _state(connection, 22) == "open"
+    assert _scalar(
+        connection,
+        "SELECT array_agg(DISTINCT status) FROM act.findings",
+    ) == ["open"]
+    assert (
+        _scalar(
+            connection,
+            "SELECT current_generation FROM act.targets WHERE target_id = %s",
+            (TARGET_ID,),
+        )
+        == 3
+    )
+
+
+def test_late_removal_preserves_source_time_but_uses_monotonic_transitions(
+    repository: Repository,
+    connection: Any,
+) -> None:
+    repository.apply_target_event(_target_event("target-upsert-late-removal"))
+    _ingest(
+        repository,
+        _envelope("attempt-before-late-removal", minute=10),
+        [_observation(22, minute=10)],
+    )
+
+    repository.apply_target_event(
+        _target_event(
+            "target-late-removal",
+            generation=2,
+            event_type="remove",
+            minute=2,
+        ),
+        finding_bucket=FINDING_BUCKET,
+    )
+
+    source_removed_at = BASE_TIME + timedelta(minutes=2)
+    assert (
+        _scalar(
+            connection,
+            "SELECT removed_at FROM act.target_events WHERE event_id = 'target-late-removal'",
+        )
+        == source_removed_at
+    )
+    finding = connection.execute(
+        """
+        SELECT last_seen_at, last_changed_at, resolved_at, resolution_reason
+        FROM act.findings
+        WHERE target_id = %s
+        ORDER BY fingerprint
+        LIMIT 1
+        """,
+        (TARGET_ID,),
+    ).fetchone()
+    assert finding["resolution_reason"] == "ownership_removed"
+    assert finding["last_changed_at"] >= finding["last_seen_at"]
+    assert finding["resolved_at"] == finding["last_changed_at"]
+    assert finding["resolved_at"] > source_removed_at
 
 
 def test_reopen_service_change_and_deterministic_findings(
@@ -529,6 +838,21 @@ def test_handoff_retry_and_processor_current_only_export(
         "scheduled-repair-1",
         finding_bucket=FINDING_BUCKET,
     ).duplicate
+    reconciliation_events = connection.execute(
+        """
+        SELECT payload
+        FROM act.finding_handoffs AS handoff
+        JOIN act.finding_events AS event
+          ON event.event_key = handoff.finding_event_key
+        WHERE handoff.handoff_kind = 'finding_event'
+          AND event.source_kind = 'reconciliation'
+          AND event.source_key = 'scheduled-repair-1'
+        ORDER BY handoff.handoff_key
+        """
+    ).fetchall()
+    assert len(reconciliation_events) == 1
+    assert reconciliation_events[0]["payload"]["event"]["event_type"] == "updated"
+    assert reconciliation_events[0]["payload"]["event"]["reason"] == "rule_changed"
     snapshots = connection.execute(
         """
         SELECT payload, object_key

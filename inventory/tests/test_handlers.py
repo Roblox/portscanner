@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import unquote_plus
 
@@ -98,8 +98,18 @@ def test_signal_processing_deduplicates_and_reconciles_resolved_target() -> None
 
 def test_signal_lambda_returns_partial_sqs_batch_failures() -> None:
     records = [
-        {"messageId": "one", "body": json.dumps({"ok": True})},
-        {"messageId": "two", "body": json.dumps({"ok": False})},
+        {
+            "eventSource": "aws:sqs",
+            "eventID": "wrong-one",
+            "messageId": "one",
+            "body": json.dumps({"ok": True}),
+        },
+        {
+            "eventSource": "aws:sqs",
+            "eventID": "wrong-two",
+            "messageId": "two",
+            "body": json.dumps({"ok": False}),
+        },
     ]
 
     def processor(value):
@@ -160,16 +170,18 @@ class SQS:
 
 def _outbox_record(event: Any, *, record_id: str = "stream-record") -> dict[str, Any]:
     return {
-        "eventID": record_id,
+        "eventSource": "aws:dynamodb",
+        "eventID": f"event-{record_id}",
         "eventName": "INSERT",
         "dynamodb": {
+            "SequenceNumber": record_id,
             "NewImage": {
                 "entity": {"S": "outbox"},
                 "event_id": {"S": event.event_id},
                 "event_json": {"S": event_json(event)},
                 "account_id": {"S": event.aws_context.account_id},
                 "region": {"S": event.aws_context.region},
-            }
+            },
         },
     }
 
@@ -387,3 +399,46 @@ def test_rescan_bucket_and_events_are_deterministic() -> None:
     assert start.minute == start.second == 0
     assert first["events"] == 1
     assert second["events"] == 0
+
+
+def test_rescan_uses_eventbridge_identity_and_time_for_freshness() -> None:
+    client = FakeDynamo()
+    state = DynamoStateStore(client, "inventory")
+    scope = SnapshotScope(source="aws-config", name="example-aggregator")
+    state.reconcile(
+        normalized_target(),
+        source=snapshot_source(scope, NOW),
+        now=NOW,
+    )
+    scheduled_at = NOW.replace(hour=5, minute=59, second=59)
+    invocation = {
+        "id": "eventbridge-scheduled-event",
+        "time": scheduled_at.isoformat().replace("+00:00", "Z"),
+    }
+
+    first = emit_coverage(
+        state,
+        now=scheduled_at + timedelta(minutes=20),
+        bucket_seconds=6 * 60 * 60,
+        event=invocation,
+    )
+    second = emit_coverage(
+        state,
+        now=scheduled_at + timedelta(minutes=25),
+        bucket_seconds=6 * 60 * 60,
+        event=invocation,
+    )
+
+    coverage_events = [
+        parse_target_event(item["event_json"]["S"])
+        for (pk, _sk), item in client.items.items()
+        if pk.startswith("OUTBOX#") and '"reason":"coverage"' in item["event_json"]["S"]
+    ]
+    assert first["events"] == 1
+    assert second["events"] == 0
+    assert len(coverage_events) == 1
+    coverage = coverage_events[0]
+    assert coverage.source.source_event_id == invocation["id"]
+    assert coverage.scan.requested_at == scheduled_at
+    assert coverage.scan.deadline_at == scheduled_at + timedelta(hours=2)
+    assert coverage.scan.not_after == scheduled_at + timedelta(hours=6)

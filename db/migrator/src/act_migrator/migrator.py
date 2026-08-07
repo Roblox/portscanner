@@ -5,10 +5,11 @@ from __future__ import annotations
 import hashlib
 import re
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import psycopg
 from psycopg.rows import tuple_row
@@ -42,6 +43,31 @@ def _checksum(up_sql: bytes, down_sql: bytes) -> str:
     return digest.hexdigest()
 
 
+def migration_set_checksum(directory: str | Path) -> str:
+    """Hash the exact ordered migration artifact set used by deployment."""
+
+    root = Path(directory)
+    if not root.is_dir():
+        raise MigrationError(f"migration directory does not exist: {root}")
+    entries = sorted(root.iterdir(), key=lambda path: path.name.encode("utf-8"))
+    symlinks = [path.name for path in entries if path.is_symlink()]
+    if symlinks:
+        raise MigrationError(f"migration directory contains a symlink: {symlinks[0]}")
+    paths = [path for path in entries if path.is_file()]
+    if not paths:
+        raise MigrationError(f"no migration files found in {root}")
+
+    digest = hashlib.sha256()
+    for path in paths:
+        name = path.name.encode("utf-8")
+        data = path.read_bytes()
+        digest.update(len(name).to_bytes(8, "big"))
+        digest.update(name)
+        digest.update(len(data).to_bytes(8, "big"))
+        digest.update(data)
+    return digest.hexdigest()
+
+
 def discover_migrations(directory: str | Path) -> list[Migration]:
     """Load paired migrations and reject gaps, duplicates, or malformed SQL names."""
     root = Path(directory)
@@ -50,6 +76,8 @@ def discover_migrations(directory: str | Path) -> list[Migration]:
 
     pairs: dict[str, dict[str, tuple[str, bytes]]] = {}
     for path in sorted(root.iterdir()):
+        if path.is_symlink():
+            raise MigrationError(f"migration directory contains a symlink: {path.name}")
         if not path.is_file():
             continue
         match = _MIGRATION_FILE.fullmatch(path.name)
@@ -95,6 +123,25 @@ def advisory_lock_key(database_name: str) -> int:
     return int.from_bytes(value, byteorder="big", signed=True)
 
 
+@contextmanager
+def migration_advisory_lock(connection: psycopg.Connection[Any]) -> Iterator[None]:
+    """Hold the schema/provisioning lock for this database session."""
+    row: Any = connection.execute("SELECT current_database()").fetchone()
+    if isinstance(row, Mapping):
+        database_name = next(iter(row.values()), None)
+    else:
+        database_name = None if row is None or not row else row[0]
+    if not isinstance(database_name, str) or not database_name:
+        raise MigrationError("database connection returned no current database name")
+
+    lock_key = advisory_lock_key(database_name)
+    connection.execute("SELECT pg_advisory_lock(%s)", (lock_key,))
+    try:
+        yield
+    finally:
+        connection.execute("SELECT pg_advisory_unlock(%s)", (lock_key,))
+
+
 class Migrator:
     """Apply a fully ordered migration set on one PostgreSQL connection."""
 
@@ -112,21 +159,9 @@ class Migrator:
             raise MigrationError("PostgreSQL 15 or newer is required")
 
     @contextmanager
-    def _advisory_lock(self) -> Iterator[None]:
-        with self.connection.cursor(row_factory=tuple_row) as cursor:
-            cursor.execute("SELECT current_database()")
-            row = cursor.fetchone()
-            if row is None or not row:
-                raise MigrationError("database connection returned no current database name")
-            database_name = row[0]
-            if not isinstance(database_name, str) or not database_name:
-                raise MigrationError("database connection returned no current database name")
-        lock_key = advisory_lock_key(database_name)
-        self.connection.execute("SELECT pg_advisory_lock(%s)", (lock_key,))
-        try:
+    def advisory_lock(self) -> Iterator[None]:
+        with migration_advisory_lock(self.connection):
             yield
-        finally:
-            self.connection.execute("SELECT pg_advisory_unlock(%s)", (lock_key,))
 
     def _ensure_metadata(self) -> None:
         with self.connection.transaction():
@@ -183,7 +218,7 @@ class Migrator:
             raise MigrationError(f"unknown target migration: {target}")
 
         applied_now: list[str] = []
-        with self._advisory_lock():
+        with self.advisory_lock():
             self._ensure_metadata()
             applied = self._applied()
             self._verify(applied)
@@ -233,7 +268,7 @@ class Migrator:
 
         reverted: list[str] = []
         by_version = {migration.version: migration for migration in self.migrations}
-        with self._advisory_lock():
+        with self.advisory_lock():
             self._ensure_metadata()
             applied = self._applied()
             self._verify(applied)

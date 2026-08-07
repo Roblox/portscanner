@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from portscanner_contracts import (
@@ -23,15 +24,31 @@ from portscanner_inventory.events import (
 )
 from portscanner_inventory.state import DynamoStateStore, ReconcileAction
 
-from .helpers import FakeDynamo, normalized_target, permission
+from .helpers import AwsError, FakeDynamo, normalized_target, permission
 
 NOW = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
 
 
-def _source():
+def _config_target(
+    *,
+    eni_at: datetime,
+    security_group_at: datetime,
+    public_ip: str = "198.51.100.10",
+    permissions: dict[str, list[dict[str, Any]]] | None = None,
+):
+    target = normalized_target(public_ip=public_ip, permissions=permissions)
+    return replace(
+        target,
+        observed_at=max(eni_at, security_group_at),
+        eni_observed_at=eni_at,
+        security_group_observed_at=((target.security_group_ids[0], security_group_at),),
+    )
+
+
+def _source(at: datetime = NOW):
     return snapshot_source(
         SnapshotScope(source="aws-config", name="example-aggregator"),
-        NOW,
+        at,
     )
 
 
@@ -44,7 +61,7 @@ def test_add_duplicate_and_relevant_change_use_monotonic_generations() -> None:
     duplicate = store.reconcile(initial, source=_source(), now=NOW)
     changed = store.reconcile(
         normalized_target(public_ip="203.0.113.20"),
-        source=_source(),
+        source=_source(NOW + timedelta(minutes=1)),
         now=NOW + timedelta(minutes=1),
     )
 
@@ -52,6 +69,8 @@ def test_add_duplicate_and_relevant_change_use_monotonic_generations() -> None:
     assert added.state is not None and added.state.generation == 1
     assert added.event is not None
     assert added.event.scan.reason is ScanReason.NEW_TARGET
+    assert added.event.scan.deadline_at == NOW + timedelta(minutes=5)
+    assert added.event.scan.not_after == NOW + timedelta(minutes=30)
     assert duplicate.action is ReconcileAction.NOOP
     assert changed.action is ReconcileAction.CHANGED
     assert changed.state is not None and changed.state.generation == 2
@@ -61,7 +80,7 @@ def test_add_duplicate_and_relevant_change_use_monotonic_generations() -> None:
     assert changed.event.scan.profile is ScanProfile.FAST_FULL_TCP
     assert changed.event.scan.priority == 200
     assert changed.event.scan.deadline_at == NOW + timedelta(minutes=6)
-    assert changed.event.scan.not_after == NOW + timedelta(minutes=11)
+    assert changed.event.scan.not_after == NOW + timedelta(minutes=31)
     assert changed.event.scan.tcp_port_ranges == (FULL_TCP_PORT_RANGE,)
     assert changed.event.aws_context.candidate_tcp_port_ranges == (FULL_TCP_PORT_RANGE,)
     assert changed.event.policy_change is None
@@ -76,7 +95,11 @@ def test_allowlisted_tag_change_is_a_noop_and_does_not_advance_generation() -> N
     second = normalized_target(tags=[{"Key": "name", "Value": "two"}])
 
     store.reconcile(first, source=_source(), now=NOW)
-    result = store.reconcile(second, source=_source(), now=NOW + timedelta(minutes=1))
+    result = store.reconcile(
+        second,
+        source=_source(NOW + timedelta(minutes=1)),
+        now=NOW + timedelta(minutes=1),
+    )
 
     assert result.action is ReconcileAction.NOOP
     assert result.state is not None and result.state.generation == 1
@@ -101,12 +124,12 @@ def test_known_instance_lifecycle_advances_and_survives_unknown_snapshots() -> N
     first = store.reconcile(running, source=_source(), now=NOW)
     snapshot = store.reconcile(
         unknown,
-        source=_source(),
+        source=_source(NOW + timedelta(minutes=1)),
         now=NOW + timedelta(minutes=1),
     )
     changed = store.reconcile(
         stopped,
-        source=_source(),
+        source=_source(NOW + timedelta(minutes=2)),
         now=NOW + timedelta(minutes=2),
     )
 
@@ -176,6 +199,8 @@ def test_policy_change_uses_bounded_targeted_tcp_delta() -> None:
     assert result.event.scan.reason is ScanReason.POLICY_CHANGE
     assert result.event.scan.profile.value == "targeted-tcp"
     assert result.event.scan.tcp_port_ranges[0].start == 80
+    assert result.event.scan.deadline_at == NOW + timedelta(minutes=6)
+    assert result.event.scan.not_after == NOW + timedelta(minutes=31)
     assert result.state.generation == 2
 
 
@@ -217,7 +242,7 @@ def test_removal_advances_generation_and_writes_tombstone_outbox() -> None:
 
     removed = store.remove(
         added.state,
-        source=_source(),
+        source=_source(NOW + timedelta(minutes=1)),
         now=NOW + timedelta(minutes=1),
     )
 
@@ -241,13 +266,13 @@ def test_stale_removal_cannot_delete_a_newer_generation() -> None:
     assert first.state is not None
     newer = store.reconcile(
         normalized_target(public_ip="203.0.113.20"),
-        source=_source(),
+        source=_source(NOW + timedelta(minutes=1)),
         now=NOW + timedelta(minutes=1),
     )
 
     result = store.remove(
         first.state,
-        source=_source(),
+        source=_source(NOW + timedelta(minutes=2)),
         now=NOW + timedelta(minutes=2),
     )
 
@@ -264,14 +289,14 @@ def test_reactivation_after_removal_is_a_new_target() -> None:
     assert added.state is not None
     removed = store.remove(
         added.state,
-        source=_source(),
+        source=_source(NOW + timedelta(minutes=1)),
         now=NOW + timedelta(minutes=1),
     )
     assert removed.state is not None
 
     reactivated = store.reconcile(
         normalized_target(),
-        source=_source(),
+        source=_source(NOW + timedelta(minutes=2)),
         now=NOW + timedelta(minutes=2),
     )
 
@@ -293,6 +318,25 @@ def test_transaction_generation_race_retries_without_skipping_generation() -> No
     assert client.transactions == 2
 
 
+@pytest.mark.parametrize(
+    "reason",
+    [
+        "ProvisionedThroughputExceeded",
+        "ThrottlingError",
+        "TransactionConflict",
+    ],
+)
+def test_nonconditional_transaction_cancellation_propagates(reason: str) -> None:
+    client = FakeDynamo()
+    client.transaction_errors = [reason]
+    store = DynamoStateStore(client, "inventory")
+
+    with pytest.raises(AwsError, match="TransactionCanceledException"):
+        store.reconcile(normalized_target(), source=_source(), now=NOW)
+
+    assert client.transactions == 1
+
+
 def test_persistent_generation_race_is_reported() -> None:
     client = FakeDynamo()
     client.fail_transactions = 10
@@ -302,6 +346,167 @@ def test_persistent_generation_race_is_reported() -> None:
 
     assert result.action is ReconcileAction.RACE
     assert result.state is None
+
+
+def test_stale_config_observation_cannot_overwrite_newer_signal_state() -> None:
+    client = FakeDynamo()
+    store = DynamoStateStore(client, "inventory")
+    initial = normalized_target().with_observation(NOW)
+    store.reconcile(initial, source=_source(), now=NOW)
+
+    signal_time = NOW + timedelta(minutes=2)
+    signaled = normalized_target(public_ip="203.0.113.20").with_signal(
+        event_name="AssociateAddress",
+        event_id="signal-event",
+        request_id="signal-request",
+        event_time=signal_time,
+        candidate_ports=CandidatePorts.full(),
+        observed_at=signal_time,
+    )
+    changed = store.reconcile(
+        signaled,
+        source=signal_source(signaled, signal_time),
+        now=signal_time,
+    )
+
+    stale_capture = NOW + timedelta(minutes=1)
+    stale = initial.with_observation(stale_capture)
+    stale_source = snapshot_source(
+        SnapshotScope(source="aws-config", name="example-aggregator"),
+        signal_time + timedelta(minutes=1),
+        observed_at=stale_capture,
+    )
+    ignored = store.reconcile(
+        stale,
+        source=stale_source,
+        now=signal_time + timedelta(minutes=1),
+    )
+
+    assert changed.state is not None and changed.state.generation == 2
+    assert ignored.action is ReconcileAction.NOOP
+    assert ignored.state is not None
+    assert ignored.state.generation == 2
+    assert ignored.state.target.public_ip == "203.0.113.20"
+    assert ignored.state.observed_at == signal_time
+
+
+def test_security_group_only_capture_advances_composite_observation() -> None:
+    client = FakeDynamo()
+    store = DynamoStateStore(client, "inventory")
+    initial = _config_target(eni_at=NOW, security_group_at=NOW)
+    store.reconcile(initial, source=_source(), now=NOW)
+
+    group_change = NOW + timedelta(minutes=2)
+    changed = _config_target(
+        eni_at=NOW,
+        security_group_at=group_change,
+        permissions={
+            initial.security_group_ids[0]: [
+                permission(start=80, end=80),
+            ]
+        },
+    )
+    result = store.reconcile(
+        changed,
+        source=_source(group_change),
+        now=group_change,
+    )
+
+    assert result.action is ReconcileAction.CHANGED
+    assert result.state is not None
+    assert result.state.generation == 2
+    assert result.state.target.policy_fingerprint == changed.policy_fingerprint
+    assert result.state.target.eni_observed_at == NOW
+    assert result.state.target.security_group_observed_at == (
+        (initial.security_group_ids[0], group_change),
+    )
+
+
+def test_newer_eni_with_stale_security_group_cannot_overwrite_signal_state() -> None:
+    client = FakeDynamo()
+    store = DynamoStateStore(client, "inventory")
+    signal_time = NOW + timedelta(minutes=2)
+    signaled = normalized_target(public_ip="203.0.113.20").with_observation(signal_time)
+    store.reconcile(
+        signaled,
+        source=_source(signal_time),
+        now=signal_time,
+    )
+
+    eni_capture = signal_time + timedelta(minutes=1)
+    stale_group_capture = NOW + timedelta(minutes=1)
+    mixed = _config_target(
+        eni_at=eni_capture,
+        security_group_at=stale_group_capture,
+    )
+    result = store.reconcile(
+        mixed,
+        source=_source(eni_capture),
+        now=eni_capture,
+    )
+
+    assert result.action is ReconcileAction.REVALIDATE
+    assert result.state is not None
+    assert result.state.generation == 1
+    assert result.state.target.public_ip == "203.0.113.20"
+    assert result.state.target.eni_observed_at is None
+    assert result.state.target.security_group_observed_at == ()
+
+
+def test_newer_idempotent_observation_advances_state_watermark() -> None:
+    client = FakeDynamo()
+    store = DynamoStateStore(client, "inventory")
+    target = normalized_target().with_observation(NOW)
+    added = store.reconcile(target, source=_source(), now=NOW)
+    assert added.state is not None
+
+    observed_at = NOW + timedelta(minutes=2)
+    source = snapshot_source(
+        SnapshotScope(source="aws-config", name="example-aggregator"),
+        observed_at,
+        observed_at=observed_at,
+    )
+    equal = store.reconcile(
+        target.with_observation(observed_at),
+        source=source,
+        now=observed_at,
+    )
+
+    assert equal.action is ReconcileAction.NOOP
+    assert equal.state is not None
+    assert equal.state.generation == 1
+    assert equal.state.observed_at == observed_at
+    assert store.get(target.target_id).observed_at == observed_at
+
+
+def test_legacy_state_without_observation_is_conditionally_upgraded() -> None:
+    client = FakeDynamo()
+    store = DynamoStateStore(client, "inventory")
+    target = normalized_target()
+    added = store.reconcile(target, source=_source(), now=NOW)
+    assert added.state is not None
+    key = (f"TARGET#{target.target_id}", "STATE")
+    legacy = client.items[key]
+    legacy.pop("observed_at")
+    target_json = json.loads(legacy["target_json"]["S"])
+    target_json.pop("observed_at")
+    legacy["target_json"]["S"] = json.dumps(
+        target_json,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+
+    changed_at = NOW + timedelta(minutes=1)
+    result = store.reconcile(
+        normalized_target(public_ip="203.0.113.20"),
+        source=_source(changed_at),
+        now=changed_at,
+    )
+
+    assert result.action is ReconcileAction.CHANGED
+    assert result.state is not None
+    assert result.state.observed_at == changed_at
+    assert client.items[key]["observed_at"]["S"] == "2026-01-02T03:05:05Z"
 
 
 def test_signal_dedupe_uses_ttl_and_can_be_released() -> None:
@@ -330,5 +535,33 @@ def test_coverage_outbox_is_deterministic_within_schedule_bucket() -> None:
 
     assert first.event is not None
     assert first.event.scan.reason is ScanReason.COVERAGE
+    assert duplicate.action is ReconcileAction.NOOP
+    assert duplicate.event is None
+
+
+def test_tag_only_state_refresh_does_not_create_new_coverage_event() -> None:
+    client = FakeDynamo()
+    store = DynamoStateStore(client, "inventory")
+    initial = normalized_target(tags=[{"Key": "name", "Value": "before"}])
+    added = store.reconcile(initial, source=_source(), now=NOW)
+    assert added.state is not None
+    coverage_source = _source()
+    first = store.enqueue_coverage(added.state, source=coverage_source, now=NOW)
+    assert first.event is not None
+
+    refreshed_at = NOW + timedelta(minutes=1)
+    refreshed = store.reconcile(
+        normalized_target(tags=[{"Key": "name", "Value": "after"}]),
+        source=_source(refreshed_at),
+        now=refreshed_at,
+    )
+    assert refreshed.action is ReconcileAction.NOOP
+    assert refreshed.state is not None
+    duplicate = store.enqueue_coverage(
+        refreshed.state,
+        source=coverage_source,
+        now=NOW,
+    )
+
     assert duplicate.action is ReconcileAction.NOOP
     assert duplicate.event is None

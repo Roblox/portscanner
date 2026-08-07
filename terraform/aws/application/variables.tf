@@ -63,6 +63,32 @@ variable "existing_isolated_subnet_ids" {
   default     = []
 }
 
+variable "existing_private_subnet_egress_mode" {
+  description = "Required existing-VPC egress declaration: nat_gateway, transit_gateway, or vpc_endpoints."
+  type        = string
+  default     = null
+
+  validation {
+    condition = var.existing_private_subnet_egress_mode == null ? true : contains(
+      ["nat_gateway", "transit_gateway", "vpc_endpoints"],
+      var.existing_private_subnet_egress_mode
+    )
+    error_message = "existing_private_subnet_egress_mode must be null, nat_gateway, transit_gateway, or vpc_endpoints."
+  }
+}
+
+variable "existing_private_vpc_endpoint_ids" {
+  description = "Existing VPC endpoint IDs keyed by required AWS service when egress mode is vpc_endpoints."
+  type        = map(string)
+  default     = {}
+}
+
+variable "existing_private_interface_endpoint_security_group_ids" {
+  description = "One attached security group per required interface endpoint, keyed by service; Terraform manages workload TLS ingress."
+  type        = map(string)
+  default     = {}
+}
+
 variable "lambda_timeout_seconds" {
   description = "Timeout for queue-triggered Lambda functions."
   type        = number
@@ -70,9 +96,9 @@ variable "lambda_timeout_seconds" {
 }
 
 variable "queue_visibility_timeout_seconds" {
-  description = "Must remain greater than lambda_timeout_seconds."
+  description = "Must be at least six times lambda_timeout_seconds for Lambda SQS event sources."
   type        = number
-  default     = 300
+  default     = 360
 }
 
 variable "queue_retention_seconds" {
@@ -152,6 +178,17 @@ variable "force_destroy_buckets" {
   description = "Delete all object versions on destroy. Enable only for disposable sandboxes."
   type        = bool
   default     = false
+}
+
+variable "ecr_untagged_image_expiration_days" {
+  description = "Optional age for expiring only untagged ECR images. Null disables ECR lifecycle expiration."
+  type        = number
+  default     = null
+
+  validation {
+    condition     = var.ecr_untagged_image_expiration_days == null ? true : var.ecr_untagged_image_expiration_days >= 1
+    error_message = "ecr_untagged_image_expiration_days must be null or positive."
+  }
 }
 
 variable "database_name" {
@@ -472,6 +509,20 @@ variable "eks_api_client_security_group_ids" {
   }
 }
 
+variable "eks_installer_principal_arns" {
+  description = "Explicit IAM role or user ARNs granted EKS ClusterAdmin access for the Terraform Helm install."
+  type        = set(string)
+  default     = []
+
+  validation {
+    condition = alltrue([
+      for arn in var.eks_installer_principal_arns :
+      can(regex("^arn:[^:]+:iam::[0-9]{12}:(?:role|user)/.+$", arn))
+    ])
+    error_message = "eks_installer_principal_arns must contain IAM role or user ARNs, never STS session ARNs."
+  }
+}
+
 variable "node_instance_types" {
   description = "Managed node types."
   type        = list(string)
@@ -523,7 +574,7 @@ variable "node_disk_size_gib" {
 }
 
 variable "bootstrap_cluster_creator_admin_permissions" {
-  description = "Bootstrap chart installer access for the creating principal."
+  description = "Retain EKS bootstrap creator administration in addition to explicit installer access."
   type        = bool
-  default     = true
+  default     = false
 }

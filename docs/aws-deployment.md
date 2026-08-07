@@ -43,12 +43,19 @@ account-wide services.
 ### AWS Config
 
 - **Clean-account mode:** set `config_mode = "create"` so the application creates the
-  recorder, delivery channel, aggregation/query resources, and required bucket policy.
+  recorder, delivery channel, aggregation/query resources, required bucket policy, and
+  same-account aggregation authorization. One module instance records only its provider
+  Region, so the created aggregator explicitly includes that Region rather than claiming
+  all-Region coverage. Each additional member account in that same source Region must
+  run the member module there and authorize the exact central account and aggregator
+  Region before the central aggregator includes it. For other source Regions, use
+  direct EC2 snapshots or an existing aggregator whose per-Region recorders and
+  authorizations are provisioned outside this one-provider module instance.
 - **Existing Config mode:** set `config_mode = "existing"` and provide
   `existing_config_aggregator_name`; the adapter receives narrow query/read
-  permissions. AWS Config has
-  account/Region singleton constraints; a second recorder or delivery channel can fail
-  or disrupt established collection.
+  permissions. Verify every intended account/Region has a healthy recorder and source
+  authorization for that aggregator. AWS Config has account/Region singleton constraints;
+  a second recorder or delivery channel can fail or disrupt established collection.
 - **No Config mode:** set `config_mode = "disabled"` and configure the direct EC2
   paginated snapshot backend. Keep periodic reconciliation; a CloudTrail event stream
   is not a replacement for inventory.
@@ -56,12 +63,19 @@ account-wide services.
 ### CloudTrail and change signals
 
 - **Clean-account mode:** without `existing_cloudtrail_arn`, Terraform creates a
-  multi-Region management trail and narrowly filtered event routes. Event dispatch
-  remains paused through earlier stages.
+  multi-Region management trail. The narrowly filtered EventBridge routes remain paused
+  through earlier stages and receive only events emitted in the Terraform provider
+  Region; a multi-Region trail does not make one regional EventBridge rule global.
 - **Existing CloudTrail mode:** provide `existing_cloudtrail_arn` for a validated
   multi-Region management trail rather than creating a duplicate trail.
 - **Signals disabled:** this is fully supported. Snapshot-driven discovery and
   reconciliation remain authoritative.
+
+For hot-path signals in another Region, deploy a uniquely named member forwarding root
+in that account and Region, pointing it at the central bus. It must create or explicitly
+reference a member/organization multi-Region management trail. Periodic Config or direct
+EC2 snapshots remain authoritative in every onboarded Region even when no forwarding
+root is deployed there.
 
 Do not enable broad data-event logging merely for this project. Review duplicate trail,
 archive, event-bus, and delivery costs before activation.
@@ -70,10 +84,25 @@ archive, event-bus, and delivery costs before activation.
 
 - **Managed VPC mode:** set `create_vpc = true`; Terraform creates dedicated public NAT,
   private workload, and isolated database subnets plus controlled routing/endpoints.
+  `vpc_cidr` must be a canonical AWS IPv4 network from `/16` through `/24`, leaving four
+  subnet bits for valid AWS subnets.
 - **Existing VPC mode:** set `create_vpc = false` and provide the existing VPC and
   subnet IDs through protected variables. The module validates VPC membership,
-  availability-zone spread, public-IP behavior, and route shape without taking
-  ownership of the shared network.
+  availability-zone spread, public-IP behavior, route shape, and that both VPC DNS
+  support and DNS hostnames are enabled, without taking ownership of the shared network.
+  It also requires
+  `existing_private_subnet_egress_mode`: every private route table must have a matching
+  NAT-gateway or transit-gateway default route, or `vpc_endpoints` must provide explicit
+  endpoint IDs for Config, DynamoDB, EC2, ECR API/DKR, EKS, EKS Auth, Logs, S3, Secrets
+  Manager, SQS, and STS. Terraform verifies each endpoint is available, in the selected
+  VPC, and exposes the expected regional service. Interface endpoints must have private
+  DNS and an explicitly selected attached security group; Terraform manages TCP/443
+  ingress to that group from the application Lambda and EKS workload security groups.
+  The S3 and DynamoDB gateway endpoints must be associated with every selected private
+  route table. AWS China names are checked per service because required endpoints use a
+  mix of `com.amazonaws` and `cn.com.amazonaws` prefixes. Review endpoint policies
+  separately because network reachability does not prove that a policy permits every
+  required API action.
 
 The first release's application module creates its EKS cluster. Adopting an unrelated
 existing cluster is not a documented deployment mode.
@@ -104,6 +133,8 @@ user event, and matching a prefix never authorizes scanning a third party.
 - an AWS deployment role obtained through short-lived credentials or OIDC;
 - Git, the AWS CLI, Docker buildx, `jq`, and Python 3 for the image publication
   helper;
+- the AWS CLI on every migrate/install/activate runner, because Helm refreshes EKS
+  credentials with `aws eks get-token`;
 - a remote Terraform backend with locking and restricted access;
 - a container registry and immutable image-digest policy;
 - a Kubernetes cluster or approval to create one;
@@ -130,9 +161,11 @@ The stages map to four explicit application flags:
 - `install_operator`; and
 - `enable_event_dispatch`.
 
-The foundation keeps all four false. Supply account-specific values, the
-`image_digests` map, and `migration_checksum` through a reviewed private variable file,
-never through a committed example.
+The foundation keeps all four false. All examples contain synthetic defaults and expose
+names, accounts, VPC/subnets, member maps, API-client security groups, and installer
+principals as variables. Supply live values, `image_digests`, and `migration_checksum`
+through a reviewed ignored private variable file, never by editing or committing an
+example.
 
 ### 1. Plan foundations with all producers disabled
 
@@ -172,7 +205,8 @@ export TF_ROOT="terraform/aws/examples/created-vpc"
 terraform/aws/scripts/build-images.sh --dry-run "${TF_ROOT}" arm64
 ```
 
-Dry run validates the root, clean source gate, tooling, paused foundation outputs,
+Dry run validates the central root, clean source gate, tooling, applied repository and
+deployment-state outputs,
 repository URL shape, all seven Dockerfile/context mappings, and the migration
 checksum. It does not call AWS, log in, build, push, or print a digest block. Use
 `PORTSCANNER_ALLOW_DIRTY=true` only when locally testing the helper itself, never for a
@@ -184,8 +218,8 @@ For an ARM deployment, `arm64` maps to `linux/arm64`,
 `lambda_architecture = "x86_64"`, and `node_ami_type =
 "AL2023_x86_64_STANDARD"`. Every component in one deployment must use the same mapping.
 
-With the reviewed commit checked out cleanly and the AWS identity and Region configured,
-push all images and capture only the final HCL:
+With the reviewed commit checked out cleanly, Trivy installed, and the AWS identity and
+Region configured, push all images and capture only the final HCL:
 
 ```bash
 SOURCE_REVISION="$(git rev-parse HEAD)"
@@ -196,11 +230,24 @@ terraform/aws/scripts/build-images.sh \
 
 Inventory, generator, parser, processor, migrator, and scanner use the repository root
 as their context; operator uses `operator/`. The helper passes `--pull` and the selected
-platform, enables provenance and SBOM attestations when buildx supports them,
-authenticates once per exact ECR registry, pushes directly, and verifies every returned
-`sha256:` digest. It refuses a non-foundation deployment state, an account/Region
-mismatch, unsafe roots or tags, `latest`, and partial output. It never runs Terraform
-apply or enables dispatch.
+platform, enables attached provenance/SBOM attestations for EKS images when buildx
+supports them, authenticates once per exact ECR registry, pushes directly, and verifies
+every returned `sha256:` digest. It accepts the application, created-VPC, existing-VPC, and central
+multi-account roots at foundation or a valid later stage, so the same path supports
+upgrades. It explicitly rejects the member root and rejects malformed stage ordering,
+an account/Region mismatch, unsafe roots or tags, `latest`, and partial output. Before
+building each component, it checks the architecture-scoped immutable commit tag and
+reuses an existing valid digest. Only a successful ECR tagged-image listing that confirms absence permits a
+build; lookup errors or malformed existing digests stop the run. A partially completed
+seven-image publication can therefore be rerun without attempting to overwrite
+immutable tags. Every reused or newly pushed digest must pass a fixable
+HIGH/CRITICAL Trivy scan before the helper emits Terraform input. It never runs
+Terraform apply or enables dispatch.
+
+ECR count-based expiration is disabled. Optional lifecycle configuration expires only
+untagged images; Terraform never expires tagged immutable releases. Operators must keep
+every digest used by the active release and rollback window, then retire tags/images
+through a separately reviewed release-retention process.
 
 Progress is written to stderr, so stdout can be redirected safely. The destination is
 chosen by the operator and must remain private and uncommitted; the helper does not
@@ -219,9 +266,16 @@ digest and that no static cloud credential exists in a Secret or image layer.
 ### 4. Run compatible migrations, then install the operator
 
 Back up the database. The `migrate` stage sets `run_migration = true` with a
-content-derived `migration_checksum`, waits for the expand-only migration, and only then
-sets `install_operator = true`. The private EKS API must be reachable from the approved
-runner for the Helm install.
+content-derived `migration_checksum`, passes that checksum to the migrator, requires the
+response to verify the same value, and only then sets `install_operator = true`. The
+private EKS API must be reachable from the approved runner for the Helm install.
+
+Set `eks_installer_principal_arns` to stable IAM role/user ARNs (never STS session ARNs)
+and `eks_api_client_security_group_ids` to the runner/VPN security groups. Terraform
+creates EKS access entries with the cluster-scoped `AmazonEKSClusterAdminPolicy`; Helm
+uses AWS CLI exec authentication, not a plan-cached token. Bootstrap creator admin is
+disabled by default and is not an installer substitute. The runner credentials must
+resolve to one of the explicit principals and have private network reachability.
 
 Migrations must be transactional where supported, idempotently recorded, and tested
 against both an empty database and the previously released schema. Do not run
@@ -250,7 +304,9 @@ idempotent reread and that known-door reconciliation retains reserved capacity.
 
 ### 8. Expand in reviewed increments
 
-Add Regions, accounts, optional CIDRs, and rates independently. Observe queue age,
+Add snapshot Regions, regional forwarding roots, accounts, optional CIDRs, and rates
+independently. Do not describe another Region as hot-path covered until its forwarding
+root and CloudTrail prerequisite are live. Observe queue age,
 ownership-gate verdicts, scan error classes, evidence lag, and cost before each
 expansion.
 

@@ -23,6 +23,7 @@ class OwnershipCheck:
     requested_generation: int
     current_generation: int | None
     decision: OwnershipDecision
+    reason: str | None = None
 
 
 class EventOwnershipService(Protocol):
@@ -101,6 +102,7 @@ def classify_verdict(verdict: Any, requested_generation: int) -> OwnershipCheck:
         requested_generation=requested_generation,
         current_generation=current,
         decision=decision,
+        reason=(str(reason) if (reason := _field(verdict, "reason")) is not None else None),
     )
 
 

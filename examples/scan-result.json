@@ -1,8 +1,8 @@
 {
   "schema_version": "1.0",
-  "event_id": "e75d11b596b622ee8f3c3b9286b9e16c6777f76c49826266e3b26a237ddca58f",
+  "event_id": "5b89df1ed9758131997b10aed4a8302bce6d79eb22f24b926e8be574563eb9c9",
   "directive_id": "cec6ecb999881a0895d8d623a8a08198afa1c129d1bf697458ad16e0ff582326",
-  "trace_id": "e75d11b596b622ee8f3c3b9286b9e16c6777f76c49826266e3b26a237ddca58f",
+  "trace_id": "5b89df1ed9758131997b10aed4a8302bce6d79eb22f24b926e8be574563eb9c9",
   "run_id": "example-run-0001",
   "attempt_id": "example-attempt-0001",
   "target": {
@@ -58,19 +58,19 @@
   "raw_result": {
     "bucket": "synthetic-results",
     "key": "verify/results/example/raw/nmap-discovery.xml",
-    "sha256": "539b0cdbc4c060f09d8605f7827fcd65ed66a16dba0a17f647f7c636502f4d27",
+    "sha256": "49ecddc95472b6ba999dbb11569a46b418df3848887cdb2ac19a0fdcd3ff81d7",
     "format": "nmap-xml",
     "enrichment": {
       "bucket": "synthetic-results",
       "key": "verify/results/example/raw/nmap-enrichment.xml",
-      "sha256": "a43751db3a149f98d96804d65cec8ce6d2c7ee5b614725008f006fb020994ffe"
+      "sha256": "a6ca6f6151b67c39290c2bf86da09a1d9b00af71ff641df567b3bd963798138b"
     }
   },
   "error": null,
   "scan_result": {
     "schema_version": "1.0",
-    "result_id": "07b066727e6f14f68a5b02a4cadfb6c69c7a034b87211e490b65f980f0ba5acf",
-    "event_id": "e75d11b596b622ee8f3c3b9286b9e16c6777f76c49826266e3b26a237ddca58f",
+    "result_id": "b24b88c266afb235c1fb9d823982d90a3145504d5061acff9845b4d14a06b525",
+    "event_id": "5b89df1ed9758131997b10aed4a8302bce6d79eb22f24b926e8be574563eb9c9",
     "directive_id": "cec6ecb999881a0895d8d623a8a08198afa1c129d1bf697458ad16e0ff582326",
     "target": {
       "target_id": "d85c41bee53f4d1b42c365ccfdb73aa611974df08171aa3727b296e3bcab737a",
@@ -123,7 +123,7 @@
       8443
     ],
     "exit_code": 0,
-    "raw_result_sha256": "539b0cdbc4c060f09d8605f7827fcd65ed66a16dba0a17f647f7c636502f4d27",
+    "raw_result_sha256": "49ecddc95472b6ba999dbb11569a46b418df3848887cdb2ac19a0fdcd3ff81d7",
     "error_code": null,
     "error_message": null
   }

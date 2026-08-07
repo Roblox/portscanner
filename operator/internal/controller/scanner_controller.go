@@ -70,11 +70,7 @@ func (r *ScannerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	}
 
 	if isTerminal(scanner.Status.Outcome) {
-		if scanner.Status.Outcome == scanningv1alpha1.OutcomeCancelled ||
-			scanner.Status.Outcome == scanningv1alpha1.OutcomeExpired {
-			return ctrl.Result{}, r.releaseAndDeleteJob(ctx, &scanner)
-		}
-		return ctrl.Result{}, r.releaseJobFinalizer(ctx, &scanner)
+		return r.reconcileTerminal(ctx, &scanner, now)
 	}
 
 	if scanner.Spec.Cancel {
@@ -93,10 +89,10 @@ func (r *ScannerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, r.releaseAndDeleteJob(ctx, &scanner)
+		return r.reconcileTerminal(ctx, &scanner, now)
 	}
 
-	deadline, err := effectiveDeadline(scanner.Spec)
+	_, notAfter, err := scanDeadlines(scanner.Spec)
 	if err != nil {
 		if statusErr := r.patchStatus(ctx, &scanner, func() {
 			setTerminalStatus(&scanner, scanningv1alpha1.OutcomeFailed, "InvalidRequest", err.Error(), now)
@@ -110,25 +106,7 @@ func (r *ScannerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}); statusErr != nil {
 			return ctrl.Result{}, statusErr
 		}
-		return ctrl.Result{}, nil
-	}
-	if !now.Before(deadline) {
-		if err := r.requestJobDeletion(ctx, &scanner); err != nil {
-			return ctrl.Result{}, err
-		}
-		if err := r.patchStatus(ctx, &scanner, func() {
-			setTerminalStatus(&scanner, scanningv1alpha1.OutcomeExpired, "Expired", "scan request expired before completion", now)
-			meta.SetStatusCondition(&scanner.Status.Conditions, metav1.Condition{
-				Type:               scanningv1alpha1.ConditionAccepted,
-				Status:             metav1.ConditionFalse,
-				Reason:             "Expired",
-				Message:            "deadline or notAfter has elapsed",
-				ObservedGeneration: scanner.Generation,
-			})
-		}); err != nil {
-			return ctrl.Result{}, err
-		}
-		return ctrl.Result{}, r.releaseAndDeleteJob(ctx, &scanner)
+		return r.reconcileTerminal(ctx, &scanner, now)
 	}
 
 	jobKey := types.NamespacedName{Name: deterministicJobName(&scanner), Namespace: scanner.Namespace}
@@ -143,7 +121,28 @@ func (r *ScannerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			}); statusErr != nil {
 				return ctrl.Result{}, statusErr
 			}
-			return ctrl.Result{}, nil
+			return r.reconcileTerminal(ctx, &scanner, now)
+		}
+		if !now.Before(notAfter) {
+			if statusErr := r.patchStatus(ctx, &scanner, func() {
+				setTerminalStatus(
+					&scanner,
+					scanningv1alpha1.OutcomeExpired,
+					"ExecutionCutoffElapsed",
+					"scan reached its absolute notAfter cutoff before Job creation",
+					now,
+				)
+				meta.SetStatusCondition(&scanner.Status.Conditions, metav1.Condition{
+					Type:               scanningv1alpha1.ConditionAccepted,
+					Status:             metav1.ConditionFalse,
+					Reason:             "ExecutionCutoffElapsed",
+					Message:            "notAfter elapsed before Job creation",
+					ObservedGeneration: scanner.Generation,
+				})
+			}); statusErr != nil {
+				return ctrl.Result{}, statusErr
+			}
+			return r.reconcileTerminal(ctx, &scanner, now)
 		}
 
 		desiredJob, buildErr := buildJob(&scanner, r.JobConfig, now)
@@ -160,7 +159,7 @@ func (r *ScannerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			}); statusErr != nil {
 				return ctrl.Result{}, statusErr
 			}
-			return ctrl.Result{}, nil
+			return r.reconcileTerminal(ctx, &scanner, now)
 		}
 		if createErr := r.Create(ctx, desiredJob); createErr != nil {
 			if !apierrors.IsAlreadyExists(createErr) {
@@ -181,7 +180,25 @@ func (r *ScannerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}); statusErr != nil {
 			return ctrl.Result{}, statusErr
 		}
-		return ctrl.Result{}, nil
+		return r.reconcileTerminal(ctx, &scanner, now)
+	}
+
+	if !now.Before(notAfter) && !jobFinished(&job) {
+		if err := r.requestJobDeletion(ctx, &scanner); err != nil {
+			return ctrl.Result{}, err
+		}
+		if err := r.patchStatus(ctx, &scanner, func() {
+			setTerminalStatus(
+				&scanner,
+				scanningv1alpha1.OutcomeExpired,
+				"ExecutionCutoffElapsed",
+				"scan exceeded its absolute notAfter execution cutoff",
+				now,
+			)
+		}); err != nil {
+			return ctrl.Result{}, err
+		}
+		return r.reconcileTerminal(ctx, &scanner, now)
 	}
 
 	if !job.DeletionTimestamp.IsZero() && !jobFinished(&job) {
@@ -190,7 +207,7 @@ func (r *ScannerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		}); err != nil {
 			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, r.releaseJobFinalizer(ctx, &scanner)
+		return r.reconcileTerminal(ctx, &scanner, now)
 	}
 
 	terminal, err := r.reflectJobStatus(ctx, &scanner, &job, now)
@@ -198,7 +215,7 @@ func (r *ScannerReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 		return ctrl.Result{}, err
 	}
 	if terminal {
-		return ctrl.Result{}, r.releaseJobFinalizer(ctx, &scanner)
+		return r.reconcileTerminal(ctx, &scanner, now)
 	}
 
 	return ctrl.Result{}, nil
@@ -389,6 +406,38 @@ func (r *ScannerReconciler) releaseJobFinalizer(ctx context.Context, scanner *sc
 	before := job.DeepCopy()
 	job.Finalizers = removeString(job.Finalizers, jobFinalizer)
 	return r.Patch(ctx, &job, client.MergeFrom(before))
+}
+
+func (r *ScannerReconciler) reconcileTerminal(
+	ctx context.Context,
+	scanner *scanningv1alpha1.Scanner,
+	now time.Time,
+) (ctrl.Result, error) {
+	var err error
+	if scanner.Status.Outcome == scanningv1alpha1.OutcomeCancelled ||
+		scanner.Status.Outcome == scanningv1alpha1.OutcomeExpired {
+		err = r.releaseAndDeleteJob(ctx, scanner)
+	} else {
+		err = r.releaseJobFinalizer(ctx, scanner)
+	}
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if scanner.Status.CompletedAt == nil {
+		return ctrl.Result{}, fmt.Errorf("terminal Scanner %s/%s has no completion timestamp", scanner.Namespace, scanner.Name)
+	}
+	deleteAt := scanner.Status.CompletedAt.Add(
+		time.Duration(scanner.Spec.TTLSecondsAfterFinished) * time.Second,
+	)
+	if now.Before(deleteAt) {
+		return ctrl.Result{RequeueAfter: deleteAt.Sub(now)}, nil
+	}
+	if err := r.Delete(ctx, scanner); err != nil {
+		return ctrl.Result{}, client.IgnoreNotFound(err)
+	}
+	// The Scanner finalizer removes any owned Job before allowing deletion.
+	return ctrl.Result{Requeue: true}, nil
 }
 
 func (r *ScannerReconciler) reconcileDeletion(ctx context.Context, scanner *scanningv1alpha1.Scanner) (ctrl.Result, error) {

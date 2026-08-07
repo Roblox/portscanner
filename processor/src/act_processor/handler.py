@@ -30,18 +30,8 @@ def lambda_handler(event: Mapping[str, Any], _context: Any) -> dict[str, Any]:
         )
 
         publisher = HandoffPublisher(s3, repository)
-        remaining = int(os.getenv("MAX_HANDOFFS_PER_RUN", "5000"))
-        published = 0
-        while remaining > 0:
-            batch_size = min(1000, remaining)
-            count = publisher.publish_pending(
-                keys=result.handoff_keys,
-                limit=batch_size,
-            )
-            published += count
-            remaining -= count
-            if count < batch_size:
-                break
+        page_size = min(1000, int(os.getenv("HANDOFF_PAGE_SIZE", "1000")))
+        published = publisher.publish_all(keys=None, page_size=page_size)
 
     return {
         "run_id": invocation_key,

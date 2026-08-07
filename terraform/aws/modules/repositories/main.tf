@@ -14,14 +14,14 @@ variable "name_prefix" {
   type        = string
 }
 
-variable "retained_image_count" {
-  description = "Number of tagged images retained per repository."
+variable "untagged_image_expiration_days" {
+  description = "Optional age for expiring only untagged images. Null disables lifecycle expiration; tagged release images are never expired here."
   type        = number
-  default     = 20
+  default     = null
 
   validation {
-    condition     = var.retained_image_count >= 1
-    error_message = "retained_image_count must be positive."
+    condition     = var.untagged_image_expiration_days == null ? true : var.untagged_image_expiration_days >= 1
+    error_message = "untagged_image_expiration_days must be null or positive."
   }
 }
 
@@ -69,18 +69,19 @@ resource "aws_ecr_repository" "this" {
 }
 
 resource "aws_ecr_lifecycle_policy" "this" {
-  for_each = aws_ecr_repository.this
+  for_each = var.untagged_image_expiration_days == null ? toset([]) : local.image_names
 
-  repository = each.value.name
+  repository = aws_ecr_repository.this[each.key].name
   policy = jsonencode({
     rules = [
       {
         rulePriority = 1
-        description  = "Retain the newest immutable images"
+        description  = "Expire only untagged images after the configured age"
         selection = {
-          tagStatus   = "any"
-          countType   = "imageCountMoreThan"
-          countNumber = var.retained_image_count
+          tagStatus   = "untagged"
+          countType   = "sinceImagePushed"
+          countUnit   = "days"
+          countNumber = var.untagged_image_expiration_days
         }
         action = {
           type = "expire"

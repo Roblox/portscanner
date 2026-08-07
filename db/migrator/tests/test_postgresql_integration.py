@@ -20,6 +20,50 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def _has_direct_connect(connection: Any, role_name: str) -> bool:
+    return bool(
+        connection.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM pg_catalog.pg_database AS database
+                CROSS JOIN LATERAL aclexplode(
+                    COALESCE(database.datacl, acldefault('d', database.datdba))
+                ) AS privilege
+                JOIN pg_catalog.pg_roles AS role
+                  ON role.oid = privilege.grantee
+                WHERE database.datname = current_database()
+                  AND role.rolname = %s
+                  AND privilege.privilege_type = 'CONNECT'
+            )
+            """,
+            (role_name,),
+        ).fetchone()[0]
+    )
+
+
+def _assert_direct_rollback_revokes_managed_connect(
+    connection: Any,
+    migrator: Migrator,
+    *,
+    public_connect_baseline: bool,
+) -> None:
+    assert migrator.down(target="000003", steps=None) == ["000004"]
+    assert not _has_direct_connect(connection, "act_runtime_test")
+    assert (
+        connection.execute(
+            """
+            SELECT has_database_privilege(
+                'act_runtime_test',
+                current_database(),
+                'CONNECT'
+            )
+            """
+        ).fetchone()[0]
+        is public_connect_baseline
+    )
+
+
 def test_fresh_up_down_and_repeat_execution() -> None:
     migrations_path = Path(__file__).resolve().parents[2] / "migrations"
     migrations = discover_migrations(migrations_path)
@@ -28,16 +72,56 @@ def test_fresh_up_down_and_repeat_execution() -> None:
         migrator = Migrator(connection, migrations)
         migrator.down(target="000000", steps=None)
 
-        assert migrator.up() == ["000001", "000002", "000003", "000004"]
+        public_connect_baseline = connection.execute(
+            """
+            SELECT EXISTS (
+                SELECT 1
+                FROM aclexplode(COALESCE(database.datacl, acldefault('d', database.datdba)))
+                WHERE grantee = 0
+                  AND privilege_type = 'CONNECT'
+            )
+            FROM pg_catalog.pg_database AS database
+            WHERE database.datname = current_database()
+            """
+        ).fetchone()[0]
+
+        assert migrator.up() == ["000001", "000002", "000003", "000004", "000005"]
         assert migrator.up() == []
         rows = connection.execute(
             "SELECT version, checksum FROM public.schema_migrations ORDER BY version"
         ).fetchall()
-        assert [row[0] for row in rows] == ["000001", "000002", "000003", "000004"]
+        assert [row[0] for row in rows] == [
+            "000001",
+            "000002",
+            "000003",
+            "000004",
+            "000005",
+        ]
         assert [row[1].strip() for row in rows] == [migration.checksum for migration in migrations]
         assert (
             connection.execute("SELECT to_regclass('act.current_findings')").fetchone()[0]
             == "act.current_findings"
+        )
+        connection.execute(
+            """
+            UPDATE act.detection_rules
+            SET severity = 'informational'
+            WHERE rule_key = 'new-or-reopened-exposure'
+            """
+        )
+        assert connection.execute(
+            """
+            SELECT severity
+            FROM act.detection_rules
+            WHERE rule_key = 'new-or-reopened-exposure'
+            """
+        ).fetchone() == ("informational",)
+        connection.execute(
+            """
+            UPDATE act.detection_rules
+            SET severity = 'low'
+            WHERE rule_key = 'new-or-reopened-exposure'
+            """
         )
 
         existing_role = connection.execute(
@@ -149,10 +233,65 @@ def test_fresh_up_down_and_repeat_execution() -> None:
                 False,
                 False,
             )
+            connection.execute("SELECT act.revoke_application_role('act_runtime_test')")
+            assert not connection.execute(
+                """
+                SELECT has_database_privilege(
+                    'act_runtime_test',
+                    current_database(),
+                    'CONNECT'
+                )
+                """
+            ).fetchone()[0]
+            connection.execute("SELECT act.grant_application_role('act_runtime_test')")
+            assert connection.execute(
+                """
+                SELECT has_database_privilege(
+                    'act_runtime_test',
+                    current_database(),
+                    'CONNECT'
+                )
+                """
+            ).fetchone()[0]
+
+            assert migrator.down(target="000004", steps=None) == ["000005"]
+            assert _has_direct_connect(connection, "act_runtime_test")
+            assert connection.execute(
+                """
+                SELECT has_database_privilege(
+                    'act_runtime_test',
+                    current_database(),
+                    'CONNECT'
+                )
+                """
+            ).fetchone()[0]
+
+            _assert_direct_rollback_revokes_managed_connect(
+                connection,
+                migrator,
+                public_connect_baseline=public_connect_baseline,
+            )
+
+            assert migrator.up() == ["000004", "000005"]
+            provision_application_credentials(
+                connection,
+                secrets,
+                database=DatabaseSettings(
+                    dsn=DATABASE_URL or "",
+                    host="database.example",
+                    port=5432,
+                    dbname="portscanner",
+                    sslmode="require",
+                ),
+                application_secret_id=APPLICATION_SECRET_ID,
+                application_username="act_runtime_test",
+                password_factory=lambda: pytest.fail("password must not be regenerated"),
+            )
         finally:
             connection.execute("SELECT act.revoke_application_role('act_runtime_test')")
 
         assert migrator.down(target="000000", steps=None) == [
+            "000005",
             "000004",
             "000003",
             "000002",

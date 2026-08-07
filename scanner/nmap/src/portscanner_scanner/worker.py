@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import math
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -15,6 +16,7 @@ from typing import Any
 
 from .coverage import CoverageError, PortCoverage
 from .nmap import (
+    NmapTerminationError,
     NmapTuning,
     Runner,
     build_discovery_command,
@@ -42,7 +44,9 @@ from .storage import (
     validate_bucket,
 )
 from .targets import authorize_target
-from .xml import NmapXmlError, validate_complete_scan
+from .xml import NmapXmlError, extract_open_tcp_ports, validate_complete_scan
+
+MIN_PHASE_EXECUTION_SECONDS = 2
 
 
 class ScanProfile(StrEnum):
@@ -70,6 +74,8 @@ class ScanRequest:
     image_version: str
     bucket: str
     prefix: str
+    deadline_at: datetime
+    not_after: datetime
     ports: str | None = None
     deep_scripts: tuple[str, ...] = ()
     configured_script_allowlist: tuple[str, ...] | None = None
@@ -85,6 +91,8 @@ class PreparedScan:
     coverage: PortCoverage
     deep_scripts: tuple[str, ...]
     keys: ObjectKeys
+    deadline_at: datetime
+    not_after: datetime
 
 
 class ScanExecutionError(RuntimeError):
@@ -110,10 +118,89 @@ class _PhaseFailureError(Exception):
     exit_code: int | None
     scanned_coverage_complete: bool = False
     open_ports: tuple[int, ...] = ()
+    publish_enrichment_artifact: bool = True
+
+
+@dataclass(frozen=True)
+class _PhaseBudget:
+    process_timeout_seconds: int
+    host_timeout_seconds: int
 
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+def _utc_datetime(value: datetime, *, name: str) -> datetime:
+    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"{name} must be a timezone-aware timestamp")
+    return value.astimezone(UTC)
+
+
+def _phase_budget(
+    *,
+    not_after: datetime,
+    now: datetime,
+    upload_reserve_seconds: int,
+    configured_process_timeout_seconds: int,
+    configured_host_timeout_seconds: int,
+) -> _PhaseBudget | None:
+    current = _utc_datetime(now, name="scanner clock")
+    remaining_seconds = math.floor((not_after - current).total_seconds())
+    execution_seconds = remaining_seconds - upload_reserve_seconds
+    if execution_seconds < MIN_PHASE_EXECUTION_SECONDS:
+        return None
+    process_timeout = min(configured_process_timeout_seconds, execution_seconds)
+    host_timeout = min(configured_host_timeout_seconds, process_timeout - 1)
+    if host_timeout < 1:
+        return None
+    return _PhaseBudget(
+        process_timeout_seconds=process_timeout,
+        host_timeout_seconds=host_timeout,
+    )
+
+
+def _insufficient_budget_failure(
+    phase: str,
+    *,
+    scanned_coverage_complete: bool = False,
+    open_ports: tuple[int, ...] = (),
+) -> _PhaseFailureError:
+    return _PhaseFailureError(
+        error_type="insufficient_execution_budget",
+        message=f"insufficient time remains before notAfter to start Nmap {phase}",
+        retryable=False,
+        exit_code=None,
+        scanned_coverage_complete=scanned_coverage_complete,
+        open_ports=open_ports,
+    )
+
+
+def _termination_failure(
+    *,
+    scanned_coverage_complete: bool = False,
+    open_ports: tuple[int, ...] = (),
+) -> _PhaseFailureError:
+    return _PhaseFailureError(
+        error_type="terminated",
+        message="scan termination was requested",
+        retryable=True,
+        exit_code=None,
+        scanned_coverage_complete=scanned_coverage_complete,
+        open_ports=open_ports,
+    )
+
+
+def _never_terminated() -> bool:
+    return False
+
+
+def _request_deadlines(request: ScanRequest) -> tuple[datetime, datetime]:
+    deadline_at = _utc_datetime(request.deadline_at, name="deadline_at")
+    not_after = _utc_datetime(request.not_after, name="not_after")
+    if deadline_at > not_after:
+        raise ValueError("deadline_at must not be later than not_after")
+    return deadline_at, not_after
 
 
 def prepare_scan(request: ScanRequest) -> PreparedScan:
@@ -147,6 +234,7 @@ def prepare_scan(request: ScanRequest) -> PreparedScan:
     validate_image_version(request.image_version)
     validate_bucket(request.bucket)
     normalize_prefix(request.prefix)
+    deadline_at, not_after = _request_deadlines(request)
     contract_target = build_contract_target(
         target_id=request.target_id,
         provider=request.target_provider,
@@ -190,6 +278,8 @@ def prepare_scan(request: ScanRequest) -> PreparedScan:
             request.event_id,
             request.attempt_id,
         ),
+        deadline_at=deadline_at,
+        not_after=not_after,
     )
 
 
@@ -204,6 +294,15 @@ def _run_phase(
 ) -> int:
     try:
         result = runner.run(command, timeout_seconds=timeout_seconds)
+    except NmapTerminationError as error:
+        raise _PhaseFailureError(
+            error_type="terminated",
+            message="scan termination was requested",
+            retryable=True,
+            exit_code=None,
+            scanned_coverage_complete=scanned_coverage_complete,
+            open_ports=open_ports,
+        ) from error
     except subprocess.TimeoutExpired as error:
         raise _PhaseFailureError(
             error_type=f"{phase}_timeout",
@@ -319,15 +418,16 @@ def _publish_failed_scan(
     *,
     request: ScanRequest,
     prepared: PreparedScan,
-    tuning: NmapTuning,
     writer: ConditionalWriter,
     started_at: datetime,
     completed_at: datetime,
     discovery_path: Path,
     enrichment_path: Path,
     discovery_argv: Sequence[str],
+    discovery_timeout_seconds: int,
     discovery_exit_code: int | None,
     enrichment_argv: Sequence[str] | None,
+    enrichment_timeout_seconds: int | None,
     enrichment_exit_code: int | None,
     failure: _PhaseFailureError,
     clock: Callable[[], datetime],
@@ -345,15 +445,16 @@ def _publish_failed_scan(
         )
     except Exception:
         raw_discovery = None
-    try:
-        raw_enrichment = _put_raw_if_present(
-            writer,
-            request=request,
-            path=enrichment_path,
-            key=prepared.keys.enrichment_xml,
-        )
-    except Exception:
-        raw_enrichment = None
+    if failure.publish_enrichment_artifact:
+        try:
+            raw_enrichment = _put_raw_if_present(
+                writer,
+                request=request,
+                path=enrichment_path,
+                key=prepared.keys.enrichment_xml,
+            )
+        except Exception:
+            raw_enrichment = None
 
     discovery_meta = command_metadata(
         redact_command(
@@ -361,7 +462,7 @@ def _publish_failed_scan(
             target=prepared.target,
             output_path=discovery_path,
         ),
-        timeout_seconds=tuning.discovery_process_timeout_seconds,
+        timeout_seconds=discovery_timeout_seconds,
         exit_code=discovery_exit_code,
     )
     if discovery_meta is None:
@@ -376,7 +477,7 @@ def _publish_failed_scan(
             if enrichment_argv is not None
             else None
         ),
-        timeout_seconds=tuning.enrichment_process_timeout_seconds,
+        timeout_seconds=enrichment_timeout_seconds or 1,
         exit_code=enrichment_exit_code,
     )
     outcome = (
@@ -413,7 +514,7 @@ def _publish_failed_scan(
         return None
 
 
-def execute_scan(
+def execute_scan(  # noqa: PLR0912, PLR0915 - phase state must remain publishable.
     request: ScanRequest,
     *,
     tuning: NmapTuning,
@@ -421,6 +522,7 @@ def execute_scan(
     writer: ConditionalWriter,
     working_directory: str | Path,
     clock: Callable[[], datetime] = _utc_now,
+    termination_requested: Callable[[], bool] = _never_terminated,
 ) -> dict[str, object]:
     """Run discovery, enrich only opens, then publish immutable artifacts."""
 
@@ -433,24 +535,42 @@ def execute_scan(
     if discovery_path.exists() or enrichment_path.exists():
         raise ValueError("scanner working directory must be dedicated and empty")
 
+    started_at = _utc_datetime(clock(), name="scanner clock")
+    discovery_budget = _phase_budget(
+        not_after=prepared.not_after,
+        now=started_at,
+        upload_reserve_seconds=tuning.upload_reserve_seconds,
+        configured_process_timeout_seconds=tuning.discovery_process_timeout_seconds,
+        configured_host_timeout_seconds=tuning.discovery_host_timeout_seconds,
+    )
+    discovery_can_start = discovery_budget is not None
+    if discovery_budget is None:
+        discovery_budget = _PhaseBudget(process_timeout_seconds=1, host_timeout_seconds=1)
     discovery_argv = build_discovery_command(
         target=prepared.target,
         coverage=prepared.coverage,
         output_path=discovery_path,
         tuning=tuning,
+        host_timeout_seconds=discovery_budget.host_timeout_seconds,
     )
     enrichment_argv: list[str] | None = None
+    enrichment_budget: _PhaseBudget | None = None
     discovery_exit_code: int | None = None
     enrichment_exit_code: int | None = None
-    started_at = clock()
 
     try:
+        if not discovery_can_start:
+            raise _insufficient_budget_failure("discovery")
+        if termination_requested():
+            raise _termination_failure()
         discovery_exit_code = _run_phase(
             runner,
             discovery_argv,
-            timeout_seconds=tuning.discovery_process_timeout_seconds,
+            timeout_seconds=discovery_budget.process_timeout_seconds,
             phase="discovery",
         )
+        if termination_requested():
+            raise _termination_failure()
         try:
             discovery_report = validate_complete_scan(
                 discovery_path,
@@ -467,21 +587,68 @@ def execute_scan(
 
         if discovery_report.open_ports:
             enrichment_coverage = PortCoverage.from_ports(discovery_report.open_ports)
+            enrichment_budget = _phase_budget(
+                not_after=prepared.not_after,
+                now=clock(),
+                upload_reserve_seconds=tuning.upload_reserve_seconds,
+                configured_process_timeout_seconds=tuning.enrichment_process_timeout_seconds,
+                configured_host_timeout_seconds=tuning.enrichment_host_timeout_seconds,
+            )
+            enrichment_can_start = enrichment_budget is not None
+            if enrichment_budget is None:
+                enrichment_budget = _PhaseBudget(
+                    process_timeout_seconds=1,
+                    host_timeout_seconds=1,
+                )
             enrichment_argv = build_enrichment_command(
                 target=prepared.target,
                 open_ports=discovery_report.open_ports,
                 output_path=enrichment_path,
                 tuning=tuning,
                 scripts=prepared.deep_scripts,
+                host_timeout_seconds=enrichment_budget.host_timeout_seconds,
             )
+            discovered_open_ports = tuple(sorted(discovery_report.open_ports))
+            if not enrichment_can_start:
+                raise _insufficient_budget_failure(
+                    "enrichment",
+                    scanned_coverage_complete=True,
+                    open_ports=discovered_open_ports,
+                )
+            if termination_requested():
+                raise _termination_failure(
+                    scanned_coverage_complete=True,
+                    open_ports=discovered_open_ports,
+                )
             enrichment_exit_code = _run_phase(
                 runner,
                 enrichment_argv,
-                timeout_seconds=tuning.enrichment_process_timeout_seconds,
+                timeout_seconds=enrichment_budget.process_timeout_seconds,
                 phase="enrichment",
                 scanned_coverage_complete=True,
-                open_ports=tuple(sorted(discovery_report.open_ports)),
+                open_ports=discovered_open_ports,
             )
+            try:
+                enrichment_open_ports = extract_open_tcp_ports(enrichment_path)
+            except NmapXmlError as error:
+                raise _PhaseFailureError(
+                    error_type="enrichment_incomplete",
+                    message="Nmap enrichment XML was incomplete",
+                    retryable=True,
+                    exit_code=enrichment_exit_code,
+                    scanned_coverage_complete=True,
+                    open_ports=discovered_open_ports,
+                ) from error
+            if enrichment_open_ports != discovery_report.open_ports:
+                raise _PhaseFailureError(
+                    error_type="enrichment_port_set_changed",
+                    message="open TCP port set changed between discovery and enrichment",
+                    retryable=True,
+                    exit_code=enrichment_exit_code,
+                    scanned_coverage_complete=False,
+                    open_ports=(),
+                    publish_enrichment_artifact=False,
+                )
             try:
                 validate_complete_scan(
                     enrichment_path,
@@ -495,22 +662,30 @@ def execute_scan(
                     retryable=True,
                     exit_code=enrichment_exit_code,
                     scanned_coverage_complete=True,
-                    open_ports=tuple(sorted(discovery_report.open_ports)),
+                    open_ports=discovered_open_ports,
                 ) from error
+        if termination_requested():
+            raise _termination_failure(
+                scanned_coverage_complete=True,
+                open_ports=tuple(sorted(discovery_report.open_ports)),
+            )
     except _PhaseFailureError as failure:
-        completed_at = clock()
+        completed_at = _utc_datetime(clock(), name="scanner clock")
         failed_payload = _publish_failed_scan(
             request=request,
             prepared=prepared,
-            tuning=tuning,
             writer=writer,
             started_at=started_at,
             completed_at=completed_at,
             discovery_path=discovery_path,
             enrichment_path=enrichment_path,
             discovery_argv=discovery_argv,
+            discovery_timeout_seconds=discovery_budget.process_timeout_seconds,
             discovery_exit_code=discovery_exit_code,
             enrichment_argv=enrichment_argv,
+            enrichment_timeout_seconds=(
+                enrichment_budget.process_timeout_seconds if enrichment_budget is not None else None
+            ),
             enrichment_exit_code=enrichment_exit_code,
             failure=failure,
             clock=clock,
@@ -521,14 +696,14 @@ def execute_scan(
             payload=failed_payload,
         ) from failure
 
-    completed_at = clock()
+    completed_at = _utc_datetime(clock(), name="scanner clock")
     discovery_meta = command_metadata(
         redact_command(
             discovery_argv,
             target=prepared.target,
             output_path=discovery_path,
         ),
-        timeout_seconds=tuning.discovery_process_timeout_seconds,
+        timeout_seconds=discovery_budget.process_timeout_seconds,
         exit_code=discovery_exit_code,
     )
     if discovery_meta is None:
@@ -543,7 +718,9 @@ def execute_scan(
             if enrichment_argv is not None
             else None
         ),
-        timeout_seconds=tuning.enrichment_process_timeout_seconds,
+        timeout_seconds=(
+            enrichment_budget.process_timeout_seconds if enrichment_budget is not None else 1
+        ),
         exit_code=enrichment_exit_code,
     )
 

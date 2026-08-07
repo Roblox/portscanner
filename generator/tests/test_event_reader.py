@@ -250,6 +250,33 @@ class EventReaderTests(unittest.TestCase):
         self.assertEqual(claims.acquired, [])
         self.assertEqual(scanner.created, [])
 
+    def test_dispatch_deadline_is_rejected_before_claim_at_boundary(self) -> None:
+        document = event_document(
+            deadline_at=NOW,
+            not_after=NOW + timedelta(minutes=30),
+        )
+        claims = FakeClaimStore()
+        scanner = FakeScannerClient()
+        services = GeneratorServices(
+            config=config(),
+            s3_client=FakeS3(json.dumps(document).encode()),
+            claim_store=claims,  # type: ignore[arg-type]
+            ownership_service=FakeOwnershipService("ACTIVE"),
+            scanner_client_factory=lambda: scanner,
+            event_parser=parse_test_event,
+            clock=lambda: NOW,
+        )
+
+        response = lambda_handler(
+            {"Records": [sqs_record(document)]},
+            None,
+            services=services,
+        )
+
+        self.assertEqual(response, {"batchItemFailures": []})
+        self.assertEqual(claims.acquired, [])
+        self.assertEqual(scanner.created, [])
+
     def test_configuration_rejects_wrong_api_group(self) -> None:
         with self.assertRaises(ConfigurationError):
             config(api_group="other.example")

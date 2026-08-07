@@ -89,6 +89,16 @@ output "cloudtrail_arn" {
   value = module.signals.cloudtrail_arn
 }
 
+output "signal_region" {
+  description = "Region containing this root's local EventBridge rules and central bus."
+  value       = module.signals.signal_region
+}
+
+output "created_config_source_regions" {
+  description = "Explicit source Regions for a created Config aggregator."
+  value       = module.signals.created_config_source_regions
+}
+
 output "function_arns" {
   value = module.functions.function_arns
 }

@@ -7,16 +7,25 @@ import hashlib
 import ipaddress
 import json
 import subprocess
+import sys
+import time
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from threading import Event, Timer
 
 import portscanner_scanner.worker as worker_module
 import pytest
 from conftest import DOCUMENTATION_TARGET, contract_target, nmap_xml
 from portscanner_scanner.cli import main
 from portscanner_scanner.coverage import PortCoverage
-from portscanner_scanner.nmap import NmapTuning, ProcessResult
+from portscanner_scanner.nmap import (
+    NmapTerminationError,
+    NmapTuning,
+    ProcessResult,
+    SubprocessRunner,
+)
+from portscanner_scanner.parser import parse_authoritative_result
 from portscanner_scanner.worker import (
     ScanExecutionError,
     ScanRequest,
@@ -42,14 +51,26 @@ class RecordingWriter:
 
 
 class FakeNmapRunner:
-    def __init__(self, *, timeout: bool = False):
+    def __init__(
+        self,
+        *,
+        timeout: bool = False,
+        terminate: bool = False,
+        enrichment_changed: bool = False,
+        enrichment_extra_open: bool = False,
+    ):
         self.timeout = timeout
+        self.terminate = terminate
+        self.enrichment_changed = enrichment_changed
+        self.enrichment_extra_open = enrichment_extra_open
         self.commands = []
 
     def run(self, command, *, timeout_seconds):
         command = list(command)
         self.commands.append((command, timeout_seconds))
         output = Path(command[command.index("-oX") + 1])
+        if self.terminate:
+            raise NmapTerminationError("test termination")
         if self.timeout:
             output.write_bytes(
                 nmap_xml(
@@ -62,7 +83,11 @@ class FakeNmapRunner:
         coverage = PortCoverage.parse(command[command.index("-p") + 1])
         first_port = next(coverage.ports())
         if "-sV" in command:
-            output.write_bytes(nmap_xml(explicit_states=dict.fromkeys(coverage.ports(), "open")))
+            state = "closed" if self.enrichment_changed else "open"
+            explicit_states = dict.fromkeys(coverage.ports(), state)
+            if self.enrichment_extra_open:
+                explicit_states[max(explicit_states) + 1] = "open"
+            output.write_bytes(nmap_xml(explicit_states=explicit_states))
         else:
             collapsed = (("closed", coverage.count - 1),) if coverage.count > 1 else ()
             output.write_bytes(
@@ -107,6 +132,8 @@ def _request() -> ScanRequest:
         image_version=f"sha256:{'a' * 64}",
         bucket="configured-results",
         prefix="verify/results",
+        deadline_at=datetime(2099, 1, 1, tzinfo=UTC),
+        not_after=datetime(2099, 1, 2, tzinfo=UTC),
     )
 
 
@@ -208,6 +235,150 @@ def test_timeout_uploads_partial_failed_envelope_and_exits_nonzero(
     assert str(tmp_path) not in json.dumps(failed["commands"])
 
 
+def test_absolute_not_after_clamps_process_and_host_timeouts(
+    tmp_path,
+    authorize_documentation_target,
+):
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    runner = FakeNmapRunner()
+    request = replace(
+        _request(),
+        deadline_at=now - timedelta(minutes=1),
+        not_after=now + timedelta(seconds=45),
+    )
+
+    execute_scan(
+        request,
+        tuning=NmapTuning(upload_reserve_seconds=30),
+        runner=runner,
+        writer=RecordingWriter(),
+        working_directory=tmp_path,
+        clock=lambda: now,
+    )
+
+    assert [timeout for _, timeout in runner.commands] == [15, 15]
+    for command, timeout in runner.commands:
+        host_timeout = command[command.index("--host-timeout") + 1]
+        assert host_timeout == f"{timeout - 1}s"
+
+
+def test_insufficient_absolute_budget_fails_before_nmap_and_publishes_envelope(
+    tmp_path,
+    authorize_documentation_target,
+):
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    runner = FakeNmapRunner()
+    writer = RecordingWriter()
+    request = replace(
+        _request(),
+        deadline_at=now - timedelta(minutes=1),
+        not_after=now + timedelta(seconds=31),
+    )
+
+    with pytest.raises(ScanExecutionError) as captured:
+        execute_scan(
+            request,
+            tuning=NmapTuning(upload_reserve_seconds=30),
+            runner=runner,
+            writer=writer,
+            working_directory=tmp_path,
+            clock=lambda: now,
+        )
+
+    assert captured.value.error_type == "insufficient_execution_budget"
+    assert runner.commands == []
+    assert [operation[0] for operation in writer.operations] == ["bytes"]
+    failed = json.loads(writer.operations[-1][2])
+    assert failed["outcome"] == "failed"
+    assert failed["error"]["retryable"] is False
+
+
+def test_termination_best_effort_publishes_failed_envelope(
+    tmp_path,
+    authorize_documentation_target,
+):
+    runner = FakeNmapRunner(terminate=True)
+    writer = RecordingWriter()
+
+    with pytest.raises(ScanExecutionError) as captured:
+        execute_scan(
+            _request(),
+            tuning=NmapTuning(),
+            runner=runner,
+            writer=writer,
+            working_directory=tmp_path,
+            clock=_clock(),
+        )
+
+    assert captured.value.error_type == "terminated"
+    assert [operation[0] for operation in writer.operations] == ["bytes"]
+    failed = json.loads(writer.operations[-1][2])
+    assert failed["outcome"] == "failed"
+    assert failed["error"]["type"] == "terminated"
+
+
+def test_subprocess_runner_stops_child_within_bounded_grace():
+    termination_event = Event()
+    runner = SubprocessRunner(
+        termination_event=termination_event,
+        terminate_grace_seconds=0.2,
+        poll_interval_seconds=0.01,
+    )
+    timer = Timer(0.05, termination_event.set)
+    timer.start()
+    started = time.monotonic()
+    try:
+        with pytest.raises(NmapTerminationError):
+            runner.run(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                timeout_seconds=10,
+            )
+    finally:
+        timer.cancel()
+    assert time.monotonic() - started < 2
+
+
+@pytest.mark.parametrize("change", ["closed", "opened"])
+def test_enrichment_port_change_is_partial_unknown_without_enrichment_reference(
+    tmp_path,
+    authorize_documentation_target,
+    change,
+):
+    runner = FakeNmapRunner(
+        enrichment_changed=change == "closed",
+        enrichment_extra_open=change == "opened",
+    )
+    writer = RecordingWriter()
+
+    with pytest.raises(ScanExecutionError) as captured:
+        execute_scan(
+            _request(),
+            tuning=NmapTuning(),
+            runner=runner,
+            writer=writer,
+            working_directory=tmp_path,
+            clock=_clock(),
+        )
+
+    assert captured.value.error_type == "enrichment_port_set_changed"
+    assert [operation[0] for operation in writer.operations] == ["file", "bytes"]
+    raw_discovery = writer.operations[0][2]
+    failed = json.loads(writer.operations[-1][2])
+    assert failed["outcome"] == "partial"
+    assert failed["coverage"]["complete"] is False
+    assert failed["raw_result"]["enrichment"] is None
+    assert failed["scan_result"]["open_tcp_ports"] == []
+    parsed = parse_authoritative_result(failed, raw_discovery)
+    assert parsed["observations"] == [
+        {
+            "protocol": "tcp",
+            "port": 80,
+            "state": "UNKNOWN",
+            "nmap_state": "open",
+        }
+    ]
+
+
 def test_cli_runs_with_fake_nmap_and_s3(
     authorize_documentation_target,
 ):
@@ -247,6 +418,10 @@ def test_cli_runs_with_fake_nmap_and_s3(
         shared_target.private_address,
         "--target-generation",
         "1",
+        "--deadline-at",
+        "2099-01-01T00:00:00Z",
+        "--not-after",
+        "2099-01-02T00:00:00Z",
         "--image-version",
         f"sha256:{'b' * 64}",
         "--s3-bucket",
@@ -258,6 +433,9 @@ def test_cli_runs_with_fake_nmap_and_s3(
     assert main(arguments, runner=runner, writer=writer) == 0
     assert [item[0] for item in writer.operations] == ["file", "file", "bytes"]
     assert all(command[0][0] == "nmap" for command in runner.commands)
+    assert all("-sT" in command[0] for command in runner.commands)
+    assert all("-sS" not in command[0] for command in runner.commands)
+    assert all("--privileged" not in command[0] for command in runner.commands)
 
 
 def test_cli_rejects_repeated_target_field():
@@ -280,6 +458,10 @@ def test_cli_rejects_repeated_target_field():
         "attempt-001",
         "--target-generation",
         "1",
+        "--deadline-at",
+        "2099-01-01T00:00:00Z",
+        "--not-after",
+        "2099-01-02T00:00:00Z",
         "--image-version",
         f"sha256:{'c' * 64}",
         "--s3-bucket",

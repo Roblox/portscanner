@@ -62,8 +62,13 @@ resource "terraform_data" "deployment_stage_validation" {
     }
 
     precondition {
-      condition     = !var.install_operator || (var.deploy_runtime && var.run_migration)
-      error_message = "install_operator requires the deployed runtime and completed migration stage."
+      condition = !var.install_operator || (
+        var.deploy_runtime &&
+        var.run_migration &&
+        length(var.eks_installer_principal_arns) > 0 &&
+        length(var.eks_api_client_security_group_ids) > 0
+      )
+      error_message = "install_operator requires runtime, migration, an explicit EKS installer principal, and an approved private API client security group."
     }
 
     precondition {
@@ -140,16 +145,19 @@ resource "terraform_data" "authorized_scope_validation" {
 module "network" {
   source = "../modules/network"
 
-  name_prefix                  = local.name
-  create_vpc                   = var.create_vpc
-  vpc_cidr                     = var.vpc_cidr
-  az_count                     = var.az_count
-  availability_zones           = var.availability_zones
-  nat_gateway_mode             = var.nat_gateway_mode
-  existing_vpc_id              = var.existing_vpc_id
-  existing_public_subnet_ids   = var.existing_public_subnet_ids
-  existing_private_subnet_ids  = var.existing_private_subnet_ids
-  existing_isolated_subnet_ids = var.existing_isolated_subnet_ids
+  name_prefix                                            = local.name
+  create_vpc                                             = var.create_vpc
+  vpc_cidr                                               = var.vpc_cidr
+  az_count                                               = var.az_count
+  availability_zones                                     = var.availability_zones
+  nat_gateway_mode                                       = var.nat_gateway_mode
+  existing_vpc_id                                        = var.existing_vpc_id
+  existing_public_subnet_ids                             = var.existing_public_subnet_ids
+  existing_private_subnet_ids                            = var.existing_private_subnet_ids
+  existing_isolated_subnet_ids                           = var.existing_isolated_subnet_ids
+  existing_private_subnet_egress_mode                    = var.existing_private_subnet_egress_mode
+  existing_private_vpc_endpoint_ids                      = var.existing_private_vpc_endpoint_ids
+  existing_private_interface_endpoint_security_group_ids = var.existing_private_interface_endpoint_security_group_ids
 }
 
 module "storage" {
@@ -173,7 +181,8 @@ module "storage" {
 module "repositories" {
   source = "../modules/repositories"
 
-  name_prefix = local.name
+  name_prefix                    = local.name
+  untagged_image_expiration_days = var.ecr_untagged_image_expiration_days
 }
 
 module "database" {
@@ -281,29 +290,31 @@ module "functions" {
 module "eks" {
   source = "../modules/eks"
 
-  name_prefix                                 = local.cluster_name
-  private_subnet_ids                          = module.network.private_subnet_ids
-  kubernetes_version                          = var.kubernetes_version
-  node_instance_types                         = var.node_instance_types
-  node_ami_type                               = var.node_ami_type
-  node_capacity_type                          = var.node_capacity_type
-  node_desired_size                           = var.node_desired_size
-  node_min_size                               = var.node_min_size
-  node_max_size                               = var.node_max_size
-  node_disk_size_gib                          = var.node_disk_size_gib
-  bootstrap_cluster_creator_admin_permissions = var.bootstrap_cluster_creator_admin_permissions
-  generator_role_arn                          = module.identities.generator_role_arn
-  generator_security_group_id                 = module.network.lambda_runtime_security_group_id
-  additional_api_client_security_group_ids    = var.eks_api_client_security_group_ids
-  scanner_pod_role_arn                        = module.identities.scanner_pod_role_arn
-  allowed_target_cidrs                        = var.allowed_target_cidrs
-  denied_target_cidrs                         = var.denied_target_cidrs
-  namespace                                   = var.eks_namespace
-  chart_path                                  = local.operator_chart_path
-  install_operator                            = var.install_operator
-  repository_urls                             = module.repositories.repository_urls
-  image_digests                               = var.image_digests
-  migration_token                             = module.functions.migration_token
-  workload_architecture                       = var.lambda_architecture
-  results_bucket_name                         = module.storage.bucket_names["results"]
+  name_prefix                                    = local.cluster_name
+  private_subnet_ids                             = module.network.private_subnet_ids
+  kubernetes_version                             = var.kubernetes_version
+  node_instance_types                            = var.node_instance_types
+  node_ami_type                                  = var.node_ami_type
+  node_capacity_type                             = var.node_capacity_type
+  node_desired_size                              = var.node_desired_size
+  node_min_size                                  = var.node_min_size
+  node_max_size                                  = var.node_max_size
+  node_disk_size_gib                             = var.node_disk_size_gib
+  bootstrap_cluster_creator_admin_permissions    = var.bootstrap_cluster_creator_admin_permissions
+  generator_role_arn                             = module.identities.generator_role_arn
+  generator_security_group_id                    = module.network.lambda_runtime_security_group_id
+  additional_api_client_security_group_ids       = var.eks_api_client_security_group_ids
+  existing_interface_endpoint_security_group_ids = module.network.existing_interface_endpoint_security_group_ids
+  installer_principal_arns                       = var.eks_installer_principal_arns
+  scanner_pod_role_arn                           = module.identities.scanner_pod_role_arn
+  allowed_target_cidrs                           = var.allowed_target_cidrs
+  denied_target_cidrs                            = var.denied_target_cidrs
+  namespace                                      = var.eks_namespace
+  chart_path                                     = local.operator_chart_path
+  install_operator                               = var.install_operator
+  repository_urls                                = module.repositories.repository_urls
+  image_digests                                  = var.image_digests
+  migration_token                                = module.functions.migration_token
+  workload_architecture                          = var.lambda_architecture
+  results_bucket_name                            = module.storage.bucket_names["results"]
 }

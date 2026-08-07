@@ -142,7 +142,7 @@ FindingState = FindingStatus
 class FindingSeverity(StrEnum):
     """Detection-rule severity copied into a finding."""
 
-    INFO = "info"
+    INFORMATIONAL = "informational"
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
@@ -868,16 +868,16 @@ class TargetEvent(DeterministicModel):
         return self
 
     def _identity_payload(self) -> Mapping[str, Any]:
+        dispatch_context = self.aws_context.to_dict()
+        dispatch_context.pop("tags", None)
         return {
             "schema_version": self.schema_version,
             "event_type": self.event_type,
-            "target_id": self.target.target_id,
-            "target_generation": self.target.generation,
-            "source_observation_id": self.source.observation_id,
-            "policy_change_id": (
-                self.policy_change.policy_change_id if self.policy_change is not None else None
-            ),
-            "directive_id": self.scan.directive_id,
+            "target": self.target,
+            "source": self.source,
+            "policy_change": self.policy_change,
+            "scan": self.scan,
+            "aws_context": dispatch_context,
         }
 
 

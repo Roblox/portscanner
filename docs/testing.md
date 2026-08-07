@@ -43,10 +43,16 @@ make test-go
 make vet-go
 ```
 
-`make ci` additionally renders Kubernetes and runs every offline Terraform
-validation root. `make containers` builds all seven local images; it is kept
-separate because image builds and vulnerability scans are substantially slower.
-The target is local-only: it does not log in or push.
+`make ci` additionally renders Kubernetes and runs every Terraform validation
+root. `terraform init -backend=false` avoids backend access, but it may download
+providers and is not an offline operation. A missing Terraform executable fails
+the target by default. A developer intentionally omitting this check may set
+`PORTSCANNER_SKIP_TERRAFORM_VALIDATE=true`; CI must not set that escape hatch.
+
+`make containers` builds all seven local images from temporary `git archive`
+contexts containing committed `HEAD` only. It is kept separate because image
+builds and vulnerability scans are substantially slower. The target is
+local-only: it does not log in or push.
 
 Adapter tests must cover pagination, deterministic identity, monotonic generation,
 duplicate and reordered input, complete and incomplete snapshots, removal rules,
@@ -68,8 +74,35 @@ Versioned contracts require:
 - canonical serialization tests for deterministic identifiers; and
 - boundary tests for field length, item count, address family, and timestamp ordering.
 
+The public JSON Schema is a structural interoperability contract. Schema validation
+alone does not prove global IP-address policy, canonical/non-overlapping port ranges,
+cross-field ordering, or deterministic identifiers. Every producer must also run the
+shared Python semantic validator before publishing: `parse_target_event`,
+`validate_scan_result`, or `validate_finding`, as appropriate. Consumers must fail
+closed through the same model validation rather than treating JSON Schema success as
+semantic acceptance.
+
 Examples should use addresses such as `192.0.2.10`, `198.51.100.20`, `203.0.113.30`, or
 `2001:db8::10` and non-live identifiers such as `resource-synthetic-a`.
+
+## Runtime dependency lock
+
+All six Python runtime images (five Lambda functions plus the Nmap worker) install
+third-party dependencies from checked-in, hash-verified exports generated from
+`uv.lock`. Regenerate and check them with:
+
+```bash
+uv run --frozen python tools/export_runtime_requirements.py
+uv run --frozen python tools/export_runtime_requirements.py --check
+```
+
+Image builds install those exports with pip hash checking and force replacement before
+installing first-party wheels with dependency resolution disabled. The Debian Python
+base uses the locked AWS Lambda Runtime Interface Client and boto3 versions rather than
+an image-bundled SDK. Container CI also verifies the frozen requirements, repository
+legal files under `/licenses`, and MIT license metadata in each Lambda component wheel.
+The shared `requirements-build.txt` pins and hashes Hatchling/Setuptools; component
+wheels are built with `--no-build-isolation`.
 
 ## Generated drift
 
@@ -109,9 +142,11 @@ tflint
 ```
 
 Run init/validate for each root module. Validation uses no live account and must not
-require a variable file. Plan tests, where present, use mocked or sandbox-only values and
-assert that dispatch defaults off, allowlists default empty, public storage is blocked,
-and existing Config/CloudTrail/VPC resources are not replaced in reference mode.
+require a variable file. Provider installation can require network access even with
+backend initialization disabled. Plan tests, where present, use mocked or sandbox-only
+values and assert that dispatch defaults off, allowlists default empty, public storage
+is blocked, and existing Config/CloudTrail/VPC resources are not replaced in reference
+mode.
 
 Never upload a plan containing live identifiers as a public CI artifact.
 
@@ -133,7 +168,7 @@ validation failures.
 
 ## Containers
 
-Build every Dockerfile from a clean context, then:
+Build every Dockerfile from a committed, tracked-only context, then:
 
 - run component tests before publishing;
 - inspect the final user, entrypoint, capabilities, and included files;
@@ -154,7 +189,14 @@ terraform/aws/scripts/tests/build-images-test.sh
 The lightweight test supplies synthetic Terraform outputs and fake AWS/Docker commands.
 It verifies that dry run prints all seven component/platform mappings to stderr, leaves
 stdout empty, never calls AWS, and rejects an outside root, `latest`, and incomplete
-foundation outputs. If ShellCheck is installed, also run:
+foundation outputs.
+
+The Terraform-owned publication helper must preserve its clean-source gate and assemble
+every Docker context from the selected committed source revision. Any explicit
+dirty-worktree mode is for non-publishing local diagnosis only and must not authenticate,
+push, or produce a release digest.
+
+If ShellCheck is installed, also run:
 
 ```bash
 shellcheck \
@@ -186,9 +228,13 @@ approval-protected, disabled unless configured, and must always run cleanup.
 ## CI map
 
 - core CI: Python, Go, schemas, and generated drift;
-- Terraform: formatting, offline initialization/validation, and TFLint;
+- Terraform: formatting, backend-disabled initialization/validation, and TFLint;
 - Kubernetes: Kustomize, Helm, and kubeconform;
 - containers: clean builds and Trivy;
 - CodeQL: supported source languages;
 - supply chain: license/REUSE, gitleaks, pre-commit, and sanitizer; and
 - AWS sandbox: manual OIDC workflow with environment approval and unconditional cleanup.
+
+The CodeQL workflow and `security-events: write` permission remain enabled. On a
+repository without GitHub Advanced Security entitlement, result upload fails externally;
+do not disable CodeQL or weaken its analysis to mask that entitlement failure.

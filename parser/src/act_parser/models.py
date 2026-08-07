@@ -219,6 +219,7 @@ class TargetEvent:
     addresses: tuple[str, ...]
     context: Mapping[str, Any]
     source_observed_at: datetime
+    scan_reason: str | None = None
     source_event_time: datetime | None = None
     source_collected_at: datetime | None = None
     dispatched_at: datetime | None = None

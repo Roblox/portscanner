@@ -4,20 +4,30 @@ import json
 from collections import deque
 from typing import Any
 
-from portscanner_inventory.aws.config_snapshot import ConfigSnapshotBackend
+from portscanner_inventory.aws.config_snapshot import (
+    NETWORK_INTERFACE_QUERY,
+    ConfigSnapshotBackend,
+)
 from portscanner_inventory.aws.ec2_snapshot import Ec2SnapshotBackend
 from portscanner_inventory.base import ScopeCompletion, SnapshotScope
 
 from .helpers import ACCOUNT_ID, ENI_ID, REGION, AwsError, eni, security_group
 
 
-def _config_record(resource_type: str, resource_id: str, configuration: dict[str, Any]) -> str:
+def _config_record(
+    resource_type: str,
+    resource_id: str,
+    configuration: dict[str, Any],
+    *,
+    captured_at: str = "2026-01-02T03:04:00Z",
+) -> str:
     return json.dumps(
         {
             "accountId": ACCOUNT_ID,
             "awsRegion": REGION,
             "resourceId": resource_id,
             "resourceType": resource_type,
+            "configurationItemCaptureTime": captured_at,
             "configuration": configuration,
         }
     )
@@ -75,6 +85,67 @@ def test_config_snapshot_paginates_both_resource_queries() -> None:
         None,
         "e-next",
     ]
+    assert "configuration.association.publicIp" not in NETWORK_INTERFACE_QUERY
+
+
+def test_config_snapshot_discovers_secondary_private_ip_eip() -> None:
+    group = _config_record(
+        "AWS::EC2::SecurityGroup",
+        "sg-11111111",
+        security_group(),
+    )
+    interface = _config_record(
+        "AWS::EC2::NetworkInterface",
+        ENI_ID,
+        eni(
+            public_ip=None,
+            secondary=[("10.0.0.11", "203.0.113.11")],
+        ),
+    )
+    client = ConfigClient(
+        groups=[{"Results": [group]}],
+        enis=[{"Results": [interface]}],
+    )
+
+    batch = ConfigSnapshotBackend(
+        client,
+        aggregator_name="example-aggregator",
+    ).collect()
+
+    assert batch.completion is ScopeCompletion.COMPLETE
+    assert [(item.private_ip, item.public_ip) for item in batch.targets] == [
+        ("10.0.0.11", "203.0.113.11")
+    ]
+    assert batch.targets[0].observed_at is not None
+    assert batch.targets[0].observed_at.isoformat() == "2026-01-02T03:04:00+00:00"
+    assert batch.targets[0].eni_observed_at == batch.targets[0].observed_at
+    assert batch.targets[0].security_group_observed_at == (
+        ("sg-11111111", batch.targets[0].observed_at),
+    )
+
+
+def test_config_snapshot_ignores_private_only_eni_before_policy_resolution() -> None:
+    interface = _config_record(
+        "AWS::EC2::NetworkInterface",
+        ENI_ID,
+        eni(
+            public_ip=None,
+            group_ids=("sg-deadbeef",),
+        ),
+    )
+    client = ConfigClient(
+        groups=[{"Results": []}],
+        enis=[{"Results": [interface]}],
+    )
+
+    batch = ConfigSnapshotBackend(
+        client,
+        aggregator_name="example-aggregator",
+    ).collect()
+
+    assert batch.completion is ScopeCompletion.COMPLETE
+    assert batch.targets == ()
+    assert batch.malformed_records == 0
 
 
 def test_config_page_failure_makes_scope_incomplete_and_keeps_safe_observations() -> None:

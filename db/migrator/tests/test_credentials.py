@@ -33,6 +33,8 @@ class _Connection:
 
     def execute(self, statement: Any, parameters: object | None = None) -> _Result:
         self.executions.append((statement, parameters))
+        if statement == "SELECT current_database()":
+            return _Result(("portscanner",))
         if statement == "SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = %s":
             return _Result((1,) if self.role_exists else None)
         return _Result(None)
@@ -89,10 +91,12 @@ def test_empty_secret_creates_login_role_and_stores_generated_password() -> None
         and any(isinstance(part, sql.Identifier) for part in statement)
         for statement, _parameters in connection.executions
     )
-    assert connection.executions[-1] == (
+    assert (
         "SELECT act.grant_application_role(%s::NAME)",
         ("runtime-role",),
-    )
+    ) in connection.executions
+    assert connection.executions[1][0] == "SELECT pg_advisory_lock(%s)"
+    assert connection.executions[-1][0] == "SELECT pg_advisory_unlock(%s)"
     assert secrets.value == {
         "host": "database.example",
         "port": 5432,
@@ -148,3 +152,42 @@ def test_existing_secret_without_password_is_not_silently_replaced() -> None:
             application_username="runtime-role",
             password_factory=lambda: pytest.fail("password must not be generated"),
         )
+
+
+def test_secret_read_role_grant_and_secret_write_stay_under_session_lock() -> None:
+    connection = _Connection(role_exists=False)
+
+    class LockAwareSecrets(_Secrets):
+        def _assert_locked(self) -> None:
+            statements = [statement for statement, _parameters in connection.executions]
+            assert "SELECT pg_advisory_lock(%s)" in statements
+            assert "SELECT pg_advisory_unlock(%s)" not in statements
+
+        def get_secret_value(self, **kwargs: Any) -> dict[str, Any]:
+            self._assert_locked()
+            return super().get_secret_value(**kwargs)
+
+        def put_secret_value(self, **kwargs: Any) -> None:
+            self._assert_locked()
+            super().put_secret_value(**kwargs)
+
+    provision_application_credentials(
+        connection,  # type: ignore[arg-type]
+        LockAwareSecrets(None),
+        database=DATABASE,
+        application_secret_id=SECRET_ID,
+        application_username="runtime-role",
+        password_factory=lambda: PASSWORD,
+    )
+
+    grant_index = next(
+        index
+        for index, execution in enumerate(connection.executions)
+        if execution[0] == "SELECT act.grant_application_role(%s::NAME)"
+    )
+    unlock_index = next(
+        index
+        for index, execution in enumerate(connection.executions)
+        if execution[0] == "SELECT pg_advisory_unlock(%s)"
+    )
+    assert grant_index < unlock_index

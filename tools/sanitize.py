@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import hashlib
 import ipaddress
 import json
 import os
@@ -68,6 +69,12 @@ class DenyTerm:
 
 
 @dataclass(frozen=True)
+class BinaryAllowance:
+    path: str
+    sha256: str
+
+
+@dataclass(frozen=True)
 class Policy:
     max_text_bytes: int
     max_binary_bytes: int
@@ -80,6 +87,7 @@ class Policy:
     deny_term_definition_paths: frozenset[str]
     forbidden_path_globs: tuple[str, ...]
     binary_extensions: frozenset[str]
+    binary_allowlist: tuple[BinaryAllowance, ...]
     deny_terms: tuple[DenyTerm, ...]
 
 
@@ -96,6 +104,37 @@ def _require_list(value: Any, field: str) -> list[Any]:
     if not isinstance(value, list):
         raise PolicyError(f"{field} must be a list")
     return value
+
+
+def _load_binary_allowlist(raw: Mapping[str, Any]) -> tuple[BinaryAllowance, ...]:
+    allowances: list[BinaryAllowance] = []
+    seen_paths: set[str] = set()
+    for index, item in enumerate(_require_list(raw.get("binary_allowlist"), "binary_allowlist")):
+        if not isinstance(item, Mapping):
+            raise PolicyError(f"binary_allowlist[{index}] must be a table")
+        binary_path = item.get("path")
+        digest = item.get("sha256")
+        if not isinstance(binary_path, str) or not binary_path:
+            raise PolicyError(f"binary_allowlist[{index}].path must be a non-empty string")
+        normalized = PurePosixPath(binary_path).as_posix()
+        if (
+            normalized != binary_path
+            or PurePosixPath(normalized).is_absolute()
+            or normalized == "."
+            or normalized.startswith("../")
+        ):
+            raise PolicyError(
+                f"binary_allowlist[{index}].path must be a normalized repository-relative path"
+            )
+        if normalized in seen_paths:
+            raise PolicyError(f"duplicate binary allowlist path: {normalized}")
+        if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+            raise PolicyError(
+                f"binary_allowlist[{index}].sha256 must be a lowercase SHA-256 digest"
+            )
+        seen_paths.add(normalized)
+        allowances.append(BinaryAllowance(path=normalized, sha256=digest))
+    return tuple(allowances)
 
 
 def load_policy(path: Path) -> Policy:
@@ -178,6 +217,7 @@ def load_policy(path: Path) -> Policy:
         deny_term_definition_paths=frozenset(string_list("deny_term_definition_paths")),
         forbidden_path_globs=tuple(string_list("forbidden_path_globs")),
         binary_extensions=frozenset(value.lower() for value in string_list("binary_extensions")),
+        binary_allowlist=_load_binary_allowlist(raw),
         deny_terms=tuple(terms),
     )
 
@@ -339,7 +379,7 @@ class Sanitizer:
                 "aws-account-id",
                 ACCOUNT_ID_RE,
                 "12-digit account ID is not an exact synthetic fixture",
-                self.policy.synthetic_account_ids,
+                self._synthetic_fixture_values(path, self.policy.synthetic_account_ids),
             )
         )
         violations.extend(
@@ -494,6 +534,34 @@ class Sanitizer:
                         relative_path,
                         "oversized-binary",
                         f"binary exceeds {self.policy.max_binary_bytes} bytes",
+                    )
+                )
+            allowance = next(
+                (item for item in self.policy.binary_allowlist if item.path == relative_path),
+                None,
+            )
+            if allowance is None:
+                violations.append(
+                    self._violation(
+                        relative_path,
+                        "binary-not-allowlisted",
+                        "binary files are denied unless exact path and SHA-256 are allowlisted",
+                    )
+                )
+                return violations
+            try:
+                digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            except OSError as exc:
+                violations.append(
+                    self._violation(relative_path, "unreadable-file", f"cannot hash file: {exc}")
+                )
+                return violations
+            if digest != allowance.sha256:
+                violations.append(
+                    self._violation(
+                        relative_path,
+                        "binary-sha256-mismatch",
+                        "binary content does not match its allowlisted SHA-256",
                     )
                 )
             return violations

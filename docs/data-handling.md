@@ -118,8 +118,12 @@ slide assets, names, local paths, state, variable files, keys, or kubeconfigs.
 `tools/sanitize.py` checks tracked files by default and can include untracked working
 tree files with `--working-tree`. Its policy rejects internal terms, live-looking cloud
 identifiers, personal data, non-documentation public addresses, sensitive file types,
-oversized binaries, and symlinks that escape the repository. The sanitizer is a release
-gate, not a substitute for review.
+all binary files by default, and symlinks that escape the repository. An intentionally
+distributable binary requires a security-reviewed allowlist entry containing both its
+exact repository-relative path and lowercase SHA-256; there are currently no such
+entries. A changed path or byte fails closed. Git-ignored local caches remain outside
+working-tree path selection rather than being scanned or allowlisted. The sanitizer is
+a release gate, not a substitute for review.
 
 Narrow sanitizer exceptions are limited to legal notice files, the public project URL,
 and explicitly listed synthetic fixture values. Changes to the policy or its exceptions

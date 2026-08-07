@@ -17,7 +17,7 @@ from botocore.exceptions import BotoCoreError, ClientError
 
 from .config import TargetEventSettings, load_target_event_settings
 from .contracts import ContractValidationError, parse_target_event
-from .database import DataInvariantError, Repository
+from .database import DataInvariantError, Repository, RuleConfigurationError
 from .handoff import HandoffPublisher, HandoffPublishError
 from .models import TargetEvent, parse_timestamp
 
@@ -347,6 +347,7 @@ def _local_target_event(value: Any) -> TargetEvent:
     source_observed_at = _timestamp(_field(source, "observed_at"), "source.observed_at")
     source_collected_at = _timestamp(_field(source, "collected_at"), "source.collected_at")
     removed_at = None
+    scan_reason = None
     if event_type == _REMOVAL_EVENT_TYPE:
         removed_at = _timestamp(_field(value, "removed_at"), "removed_at")
         dispatched_at = removed_at
@@ -355,6 +356,7 @@ def _local_target_event(value: Any) -> TargetEvent:
     else:
         scan = _field(value, "scan")
         dispatched_at = _timestamp(_field(scan, "requested_at"), "scan.requested_at")
+        scan_reason = _text(_field(scan, "reason"), "scan.reason")
         database_event_type = "upsert"
         addresses = (public_address,)
     if not source_event_time <= source_observed_at <= source_collected_at <= dispatched_at:
@@ -373,13 +375,14 @@ def _local_target_event(value: Any) -> TargetEvent:
         context=context,
         source_event_time=source_event_time,
         source_observed_at=source_observed_at,
+        scan_reason=scan_reason,
         source_collected_at=source_collected_at,
         dispatched_at=dispatched_at,
         removed_at=removed_at,
     )
 
 
-def _publish_removal_handoffs(
+def _publish_target_event_handoffs(
     s3: Any,
     repository: Repository,
     event_id: str,
@@ -387,12 +390,7 @@ def _publish_removal_handoffs(
     keys = repository.pending_target_event_handoff_keys(event_id)
     if not keys:
         return
-    publisher = HandoffPublisher(s3, repository)
-    while True:
-        limit = min(1000, len(keys))
-        published = publisher.publish_pending(keys=keys, limit=limit)
-        if published < limit:
-            return
+    HandoffPublisher(s3, repository).publish_all(keys=keys)
 
 
 def _process_target_event(
@@ -416,8 +414,9 @@ def _process_target_event(
         with psycopg.connect(settings.database_dsn) as connection:
             repository = Repository(connection)
             repository.apply_target_event(event, finding_bucket=settings.finding_bucket)
-            if event.event_type == "remove":
-                _publish_removal_handoffs(s3, repository, event.event_id)
+            _publish_target_event_handoffs(s3, repository, event.event_id)
+    except RuleConfigurationError as error:
+        raise RetryableRecordError("editable detection rule configuration is invalid") from error
     except DataInvariantError as error:
         raise PermanentRecordError("target event violates a data-plane invariant") from error
     except (psycopg.Error, BotoCoreError, ClientError, HandoffPublishError, OSError) as error:
@@ -449,7 +448,7 @@ def lambda_handler(event: Mapping[str, Any], _context: Any) -> dict[str, Any]:
                 message_id,
             )
         except Exception:
-            LOGGER.error(
+            LOGGER.exception(
                 "target event deferred message_id=%s reason=retryable_processing",
                 message_id,
             )

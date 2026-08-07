@@ -26,12 +26,44 @@ def schedule_bucket(now: datetime, bucket_seconds: int) -> tuple[int, datetime]:
     return bucket, datetime.fromtimestamp(bucket * bucket_seconds, tz=UTC)
 
 
-def emit_coverage(
-    state: Any,
+def _scheduled_time(value: Any) -> datetime:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    else:
+        raise ValueError("scheduled event time is invalid")
+    if parsed.tzinfo is None:
+        raise ValueError("scheduled event time must be timezone aware")
+    return parsed.astimezone(UTC)
+
+
+def coverage_source(
+    event: Mapping[str, Any],
     *,
     now: datetime,
     bucket_seconds: int,
-) -> dict[str, int]:
+) -> tuple[EventSource, datetime]:
+    """Use an EventBridge identity, or a deterministic bucket for direct calls."""
+
+    raw_event_id = event.get("id")
+    raw_event_time = event.get("time")
+    if raw_event_id is not None or raw_event_time is not None:
+        if not isinstance(raw_event_id, str) or not raw_event_id.strip():
+            raise ValueError("scheduled EventBridge event has no id")
+        scheduled_at = _scheduled_time(raw_event_time)
+        source = EventSource(
+            name="scheduled-coverage",
+            event_id=raw_event_id,
+            request_id=deterministic_sha256(
+                "portscanner.inventory.coverage-request.v1",
+                {"event_id": raw_event_id, "event_time": scheduled_at},
+            ),
+            event_time=scheduled_at,
+            observed_at=scheduled_at,
+        )
+        return source, scheduled_at
+
     bucket, scheduled_at = schedule_bucket(now, bucket_seconds)
     source = EventSource(
         name="scheduled-coverage",
@@ -45,6 +77,21 @@ def emit_coverage(
         ),
         event_time=scheduled_at,
         observed_at=scheduled_at,
+    )
+    return source, scheduled_at
+
+
+def emit_coverage(
+    state: Any,
+    *,
+    now: datetime,
+    bucket_seconds: int,
+    event: Mapping[str, Any] | None = None,
+) -> dict[str, int]:
+    source, scheduled_at = coverage_source(
+        event or {},
+        now=now,
+        bucket_seconds=bucket_seconds,
     )
     emitted = 0
     races = 0
@@ -81,11 +128,12 @@ class _Runtime:
             outbox_ttl_seconds=settings.outbox_ttl_seconds,
         )
 
-    def process(self, _event: Mapping[str, Any]) -> dict[str, int]:
+    def process(self, event: Mapping[str, Any]) -> dict[str, int]:
         return emit_coverage(
             self.state,
             now=utc_now(),
             bucket_seconds=self.settings.rescan_bucket_seconds,
+            event=event,
         )
 
 

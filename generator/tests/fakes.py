@@ -25,9 +25,10 @@ def event_document(
     generation: int = 3,
     event_type: str = "target.upsert",
     reason: str = "new_target",
+    deadline_at: datetime | None = None,
     not_after: datetime | None = None,
 ) -> dict[str, Any]:
-    deadline = NOW + timedelta(minutes=5)
+    deadline = deadline_at or NOW + timedelta(minutes=5)
     freshness = not_after or NOW + timedelta(minutes=10)
     return {
         "schema_version": "1.0",
@@ -236,19 +237,39 @@ class FakeScannerClient:
         self.create_result = create_result
         self.created: list[Mapping[str, Any]] = []
         self.deleted: list[str] = []
+        self.delete_requests: list[str] = []
+        self.get_requests: list[str] = []
         self.listed_hashes: list[str] = []
 
     def create(self, body: Mapping[str, Any]) -> CreateResult:
         self.created.append(copy.deepcopy(body))
         return self.create_result
 
+    def get(self, name: str) -> Mapping[str, Any] | None:
+        self.get_requests.append(name)
+        return next(
+            (
+                item
+                for item in self.items
+                if isinstance(item.get("metadata"), Mapping)
+                and item["metadata"].get("name") == name
+            ),
+            None,
+        )
+
     def list_for_target_hash(self, opaque_target_hash: str) -> list[Mapping[str, Any]]:
         self.listed_hashes.append(opaque_target_hash)
         return self.items
 
     def delete(self, name: str) -> bool:
-        self.deleted.append(name)
-        return True
+        self.delete_requests.append(name)
+        for index, item in enumerate(self.items):
+            metadata = item.get("metadata")
+            if isinstance(metadata, Mapping) and metadata.get("name") == name:
+                self.items.pop(index)
+                self.deleted.append(name)
+                return True
+        return False
 
 
 def scanner_item(target_id: str, generation: int, name: str) -> dict[str, Any]:

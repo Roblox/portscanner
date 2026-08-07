@@ -11,6 +11,7 @@ from botocore.exceptions import ClientError
 from .database import Repository, canonical_payload_bytes
 
 _PRECONDITION_FAILED = 412
+_MAX_PAGE_SIZE = 1000
 
 
 class HandoffPublishError(RuntimeError):
@@ -76,6 +77,22 @@ class HandoffPublisher:
             self.repository.mark_handoff_published(handoff_key)
             published += 1
         return published
+
+    def publish_all(
+        self,
+        *,
+        keys: Sequence[str] | None = None,
+        page_size: int = 1000,
+    ) -> int:
+        """Drain all matching handoffs through bounded database pages."""
+        if not 1 <= page_size <= _MAX_PAGE_SIZE:
+            raise ValueError("handoff page_size must be between 1 and 1000")
+        published = 0
+        while True:
+            count = self.publish_pending(keys=keys, limit=page_size)
+            published += count
+            if count < page_size:
+                return published
 
     def _existing_object_matches(
         self,

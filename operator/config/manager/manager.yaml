@@ -39,7 +39,7 @@ spec:
             - --result-prefix=scan-results
             - --high-priority-class=portscanner-high
             - --normal-priority-class=portscanner-normal
-            - --high-priority-threshold=500
+            - --high-priority-threshold=100
           ports:
             - name: metrics
               containerPort: 8080

@@ -21,18 +21,23 @@ authenticates to EKS and creates namespaced `Scanner` resources.
 ## Lifecycle
 
 1. A namespaced Scanner describes exactly one target and one source event.
-2. The controller rejects a request whose `deadline` or `notAfter` has elapsed.
+2. The generator uses `deadline` as the latest dispatch time. Once the Scanner
+   exists, the controller treats that dispatch decision as complete and does
+   not truncate execution at `deadline`.
 3. It creates a deterministic, owner-referenced Job name. Reconciliation never
    creates a second concurrent Job for the same Scanner.
-4. The earlier of `deadline` and `notAfter` becomes the Job active deadline.
+4. `notAfter` is the absolute execution cutoff and alone determines the Job
+   active deadline. An already-created Job is not stopped at `deadline`.
 5. Job success or failure is mirrored into lifecycle-only Scanner conditions,
    outcome, and timestamps.
 6. `spec.cancel: true` or deletion removes an active Job. A status-protection
    finalizer prevents Job TTL cleanup from racing terminal status reporting.
+7. A terminal Scanner is requeued until `ttlSecondsAfterFinished`, then deleted;
+   owner deletion removes any remaining Job. A zero TTL deletes immediately.
 
-`retryLimit` maps to `backoffLimit`; `ttlSecondsAfterFinished` maps to the Job
-TTL controller. One-shot execution fields are immutable after creation; only
-`spec.cancel` may change.
+`retryLimit` maps to `backoffLimit`; `ttlSecondsAfterFinished` applies to both
+the Job TTL controller and terminal Scanner cleanup. One-shot execution fields
+are immutable after creation; only `spec.cancel` may change.
 
 ## Scanner image contract
 
@@ -45,7 +50,9 @@ The configured scanner image receives these arguments:
 - `--service-detection` for the `deep` profile
 
 `fast-full-tcp` always uses `1-65535`. `targeted-tcp` requires ports or ranges.
-`deep` uses supplied coverage or explicitly defaults to `1-65535`.
+`deep` uses supplied coverage or explicitly defaults to `1-65535`. Explicit
+coverage is limited to 256 combined port/range terms at admission and 256
+normalized terms at Job construction, matching the shared result envelope.
 
 Correlation is carried in environment variables, not annotations:
 
@@ -59,6 +66,8 @@ Correlation is carried in environment variables, not annotations:
   `PORTSCANNER_ATTEMPT_ID` from the Pod UID through Downward API field refs
 - `PORTSCANNER_IMAGE_VERSION`, equal to the configured digest-pinned image URI
 - `PORTSCANNER_SOURCE_EVENT_AT`, `PORTSCANNER_SOURCE_OBSERVED_AT`
+- `PORTSCANNER_DEADLINE_AT`, the latest dispatch time, and
+  `PORTSCANNER_NOT_AFTER`, the absolute execution cutoff
 - `PORTSCANNER_RESOURCE_NAME`, `PORTSCANNER_RESOURCE_NAMESPACE`
 - `PORTSCANNER_RESULT_BUCKET`, `PORTSCANNER_RESULT_PREFIX`
 
@@ -114,11 +123,12 @@ placeholders and must be replaced before deployment.
 ## Security
 
 Scanner Pods run non-root with RuntimeDefault seccomp, no privilege escalation,
-a read-only root filesystem, all capabilities dropped except `NET_RAW`, no
+a read-only root filesystem, all Linux capabilities dropped, no
 automounted Kubernetes API token, and a bounded writable `/tmp` emptyDir. CPU,
 memory, and ephemeral-storage requests and limits are mandatory controller
 configuration. Jobs use `restartPolicy: Never`, one completion, and one
-parallel Pod.
+parallel Pod. The scanner uses non-root TCP connect scans and does not require
+raw-socket access or Kubernetes privileged-container mode.
 
 The default scanner Role intentionally has no rules. Add narrowly scoped rules
 only if a chosen scanner implementation documents a Kubernetes API need.

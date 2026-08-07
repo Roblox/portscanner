@@ -44,6 +44,13 @@ This can reduce signal delay, but it does not replace:
 A forwarded event is a hint. Its mutable fields never become authoritative Target
 metadata or scanner arguments.
 
+The AWS member module forwards only its provider Region. Its EC2 API-call pattern emits
+nothing without a member or organization management CloudTrail, so active forwarding
+requires `cloudtrail_mode = "create"` or an explicit `existing_cloudtrail_arn`. A
+multi-Region trail supplies CloudTrail history, but EventBridge default buses and rules
+are regional. Deploy a uniquely named member forwarding root in every Region requiring
+the hot path, all targeting the central regional bus; use snapshots elsewhere.
+
 ### Hybrid
 
 Spokes forward signals while the hub assumes a read role for snapshots and rereads.
@@ -84,6 +91,9 @@ contain:
 
 Repository examples use `${SPOKE_ACCOUNT_ID}` and `${SPOKE_READ_ROLE}` placeholders.
 Never commit account numbers, role ARNs, organization IDs, or external-condition values.
+The Terraform examples expose these values as variables with synthetic defaults. Put
+live account maps, names, Regions, ARNs, and external IDs only in ignored private
+variable files.
 
 ## Source isolation
 
@@ -104,9 +114,15 @@ Display names and mutable tags are not identity.
 1. Record explicit scanning authorization, provider-policy review, accounts, Regions,
    CIDRs, profiles, rates, and owner.
 2. Choose snapshot-only, assume-role, event-forwarding, or hybrid mode.
-3. Review existing Config and CloudTrail resources; do not create duplicates
-   automatically.
-4. Deploy the spoke read role and optional filtered event target with no dispatch grant.
+3. Review existing Config and CloudTrail resources. For Config aggregation, create the
+   source authorization in each exact member Region for the central account and
+   aggregator Region before adding that source to an aggregator configured for that
+   Region. The application create mode includes only its own provider Region; use direct
+   snapshots or an externally provisioned existing aggregator for others. For event
+   forwarding, choose member `cloudtrail_mode = "create"` or reference and live-verify
+   a member/organization multi-Region management trail.
+4. Deploy the spoke read role and one optional filtered event target per signal Region,
+   with unique state/name and no dispatch grant.
 5. Add the protected hub registry entry with dispatch disabled.
 6. Run a complete snapshot and validate pagination, completeness, metadata redaction,
    identity, and generation.

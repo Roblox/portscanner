@@ -19,11 +19,12 @@ const (
 )
 
 // ScanReason is the shared reason a scan entered the execution boundary.
-// +kubebuilder:validation:Enum=new_target;policy_change;coverage;manual
+// +kubebuilder:validation:Enum=new_target;target_change;policy_change;coverage;manual
 type ScanReason string
 
 const (
 	ReasonNewTarget    ScanReason = "new_target"
+	ReasonTargetChange ScanReason = "target_change"
 	ReasonPolicyChange ScanReason = "policy_change"
 	ReasonCoverage     ScanReason = "coverage"
 	ReasonManual       ScanReason = "manual"
@@ -120,6 +121,8 @@ type SourceTimestamps struct {
 // ScannerSpec defines one bounded, one-shot scan request.
 // +kubebuilder:validation:XValidation:rule="self.profile != 'targeted-tcp' || (has(self.ports) && size(self.ports) > 0) || (has(self.ranges) && size(self.ranges) > 0)",message="targeted-tcp requires at least one port or range"
 // +kubebuilder:validation:XValidation:rule="!has(self.ranges) || self.ranges.all(r, r.start <= r.end)",message="each port range start must be less than or equal to end"
+// +kubebuilder:validation:XValidation:rule="(!has(self.ports) ? 0 : size(self.ports)) + (!has(self.ranges) ? 0 : size(self.ranges)) <= 256",message="combined TCP port and range coverage must contain at most 256 terms"
+// +kubebuilder:validation:XValidation:rule="self.deadline <= self.notAfter",message="deadline must not be later than notAfter"
 // +kubebuilder:validation:XValidation:rule="self.target == oldSelf.target && self.eventId == oldSelf.eventId && self.directiveId == oldSelf.directiveId && self.traceId == oldSelf.traceId && self.reason == oldSelf.reason && self.profile == oldSelf.profile && ((!has(self.ports) && !has(oldSelf.ports)) || (has(self.ports) && has(oldSelf.ports) && self.ports == oldSelf.ports)) && ((!has(self.ranges) && !has(oldSelf.ranges)) || (has(self.ranges) && has(oldSelf.ranges) && self.ranges == oldSelf.ranges)) && self.priority == oldSelf.priority && self.deadline == oldSelf.deadline && self.notAfter == oldSelf.notAfter && self.sourceTimestamps == oldSelf.sourceTimestamps && self.retryLimit == oldSelf.retryLimit && self.ttlSecondsAfterFinished == oldSelf.ttlSecondsAfterFinished",message="scan execution fields are immutable; only cancel may change"
 type ScannerSpec struct {
 	// Target is the only scan target for this resource.
@@ -147,14 +150,14 @@ type ScannerSpec struct {
 
 	// Ports is an explicit set of TCP ports. Values are deduplicated before
 	// being passed to the scanner.
-	// +kubebuilder:validation:MaxItems=65535
+	// +kubebuilder:validation:MaxItems=256
 	// +kubebuilder:validation:items:Minimum=1
 	// +kubebuilder:validation:items:Maximum=65535
 	// +listType=set
 	Ports []int32 `json:"ports,omitempty"`
 
 	// Ranges is an explicit set of inclusive TCP port ranges.
-	// +kubebuilder:validation:MaxItems=1024
+	// +kubebuilder:validation:MaxItems=256
 	Ranges []PortRange `json:"ranges,omitempty"`
 
 	// Priority is mapped to the configured high or normal PriorityClass.
@@ -162,11 +165,12 @@ type ScannerSpec struct {
 	// +kubebuilder:validation:Maximum=1000
 	Priority int32 `json:"priority"`
 
-	// Deadline is the request deadline. The earlier of Deadline and NotAfter
-	// becomes the Job active deadline.
+	// Deadline is the latest time at which the generator may dispatch this
+	// request. It does not truncate an already-dispatched scan.
 	Deadline metav1.Time `json:"deadline"`
 
-	// NotAfter is the source event's absolute expiry time.
+	// NotAfter is the source event's absolute execution cutoff. It becomes the
+	// Job active deadline and is enforced independently by the scanner.
 	NotAfter metav1.Time `json:"notAfter"`
 
 	// SourceTimestamps records source event timing.
@@ -178,7 +182,8 @@ type ScannerSpec struct {
 	// +kubebuilder:validation:Maximum=6
 	RetryLimit int32 `json:"retryLimit,omitempty"`
 
-	// TTLSecondsAfterFinished controls cleanup of the completed Job.
+	// TTLSecondsAfterFinished controls cleanup of the terminal Scanner and its
+	// owned Job.
 	// +kubebuilder:default=3600
 	// +kubebuilder:validation:Minimum=0
 	TTLSecondsAfterFinished int32 `json:"ttlSecondsAfterFinished,omitempty"`

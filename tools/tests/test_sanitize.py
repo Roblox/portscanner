@@ -3,12 +3,14 @@
 
 from __future__ import annotations
 
+import hashlib
 import subprocess
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
-from tools.sanitize import Sanitizer, git_paths, load_policy
+from tools.sanitize import BinaryAllowance, Sanitizer, git_paths, load_policy
 
 POLICY_PATH = Path(__file__).resolve().parents[1] / "sanitize-policy.toml"
 
@@ -75,8 +77,9 @@ class SanitizerTests(unittest.TestCase):
     def test_account_id_requires_exact_synthetic_fixture(self) -> None:
         synthetic = "123456" + "789012"
         other = "987654" + "321098"
-        self.assertNotIn("aws-account-id", self.rules(synthetic))
-        self.assertIn("aws-account-id", self.rules(other))
+        self.assertNotIn("aws-account-id", self.rules(synthetic, "tools/tests/sample.py"))
+        self.assertIn("aws-account-id", self.rules(synthetic))
+        self.assertIn("aws-account-id", self.rules(other, "tools/tests/sample.py"))
 
     def test_account_digits_inside_hash_are_not_an_account_id(self) -> None:
         digest = "abc" + ("987654" + "321098") + "def"
@@ -165,6 +168,58 @@ class SanitizerTests(unittest.TestCase):
         rules = {violation.rule for violation in self.sanitizer.scan_path(path, "artifact.bin")}
         self.assertIn("oversized-binary", rules)
 
+    def test_rejects_small_png_and_pdf_by_default(self) -> None:
+        png = self.write("docs/diagram.png", b"\x89PNG\r\n\x1a\n")
+        pdf = self.write("docs/guide.pdf", b"%PDF-1.7\n%%EOF\n")
+
+        for path, relative_path in ((png, "docs/diagram.png"), (pdf, "docs/guide.pdf")):
+            with self.subTest(path=relative_path):
+                rules = {
+                    violation.rule for violation in self.sanitizer.scan_path(path, relative_path)
+                }
+                self.assertIn("binary-not-allowlisted", rules)
+
+    def test_rejects_binary_internal_data_instead_of_skipping_content(self) -> None:
+        internal_data = b"\0service." + b"internal\n"
+        path = self.write("fixtures/internal-data.bin", internal_data)
+        rules = {
+            violation.rule
+            for violation in self.sanitizer.scan_path(path, "fixtures/internal-data.bin")
+        }
+        self.assertIn("binary-not-allowlisted", rules)
+
+    def test_binary_allowlist_requires_exact_path_and_sha256(self) -> None:
+        content = b"\x89PNG\r\n\x1a\nsynthetic"
+        digest = hashlib.sha256(content).hexdigest()
+        policy = replace(
+            self.policy,
+            binary_allowlist=(BinaryAllowance(path="docs/approved.png", sha256=digest),),
+        )
+        sanitizer = Sanitizer(self.root, policy)
+
+        approved = self.write("docs/approved.png", content)
+        wrong_path = self.write("docs/copy.png", content)
+        changed = self.write("docs/changed.png", content + b"-changed")
+        changed_policy = replace(
+            policy,
+            binary_allowlist=(BinaryAllowance(path="docs/changed.png", sha256=digest),),
+        )
+
+        self.assertEqual(sanitizer.scan_path(approved, "docs/approved.png"), [])
+        self.assertIn(
+            "binary-not-allowlisted",
+            {violation.rule for violation in sanitizer.scan_path(wrong_path, "docs/copy.png")},
+        )
+        self.assertIn(
+            "binary-sha256-mismatch",
+            {
+                violation.rule
+                for violation in Sanitizer(self.root, changed_policy).scan_path(
+                    changed, "docs/changed.png"
+                )
+            },
+        )
+
     def test_rejects_escaping_symlink(self) -> None:
         with tempfile.TemporaryDirectory() as outside_directory:
             outside = Path(outside_directory) / "outside.txt"
@@ -196,18 +251,23 @@ class SanitizerTests(unittest.TestCase):
             check=True,
             capture_output=True,
         )
+        self.write(".gitignore", ".cache/\n")
         self.write("tracked.txt", "tracked\n")
         self.write("untracked.txt", "untracked\n")
+        self.write(".cache/local.bin", b"\0local cache\n")
         subprocess.run(
-            ["git", "-C", str(self.root), "add", "tracked.txt"],
+            ["git", "-C", str(self.root), "add", ".gitignore", "tracked.txt"],
             check=True,
             capture_output=True,
         )
 
-        self.assertEqual(git_paths(self.root, working_tree=False), ["tracked.txt"])
+        self.assertEqual(
+            sorted(git_paths(self.root, working_tree=False)),
+            [".gitignore", "tracked.txt"],
+        )
         self.assertEqual(
             sorted(git_paths(self.root, working_tree=True)),
-            ["tracked.txt", "untracked.txt"],
+            [".gitignore", "tracked.txt", "untracked.txt"],
         )
 
 

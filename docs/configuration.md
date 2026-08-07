@@ -92,17 +92,24 @@ Terraform exposes the deployment boundary in `terraform/aws/application`:
 - `config_mode` (`create`, `existing`, or `disabled`) and
   `existing_config_aggregator_name`;
 - `existing_cloudtrail_arn`;
-- `create_vpc` plus existing VPC/subnet inputs;
+- `create_vpc` plus existing VPC/subnet inputs and the required existing-private-subnet
+  egress declaration;
 - `authorized_account_ids`, `allowed_member_account_ids`,
   `member_collector_role_arns`, `allowed_target_cidrs`, and
   `denied_target_cidrs`;
+- `eks_api_client_security_group_ids` and `eks_installer_principal_arns` for the
+  private Helm runner's network and identity paths;
 - `snapshot_schedule_expression` (five minutes by default) and
   `rescan_schedule_expression` (six hours by default);
+- `queue_visibility_timeout_seconds`, 360 seconds by default and required to be at
+  least six times the Lambda timeout;
 - `queue_age_alarm_threshold_seconds` and
   `iterator_age_alarm_threshold_seconds` (15 minutes by default);
 - optional `alarm_action_arns` and `ok_action_arns`, both empty by default;
 - `force_destroy_buckets`, disabled by default and intended only for disposable
   sandbox cleanup;
+- `ecr_untagged_image_expiration_days`, null by default; no Terraform lifecycle rule
+  expires tagged release images;
 - `image_digests` and `migration_checksum`; and
 - staged flags `deploy_runtime`, `run_migration`, `install_operator`, and
   `enable_event_dispatch`.
@@ -111,6 +118,33 @@ All scope collections default empty and all activation flags default false. Even
 dispatch still requires nonempty `authorized_account_ids`; the target CIDR sets are
 optional defense-in-depth. They are useful when authorization follows fixed Elastic IP
 ranges, but are often impractical for dynamic public addresses.
+
+`config_mode = "create"` records only the provider Region and scopes its aggregator to
+that explicit Region. A member account in that same source Region must grant
+`aws_config_aggregate_authorization` to the exact central account and aggregator Region
+before becoming a created-aggregator source. Other Config source Regions require direct
+EC2 snapshots or an externally provisioned existing aggregator. Existing aggregators
+remain a live prerequisite: Terraform cannot prove their source authorizations or
+recorder coverage.
+
+EventBridge is regional. The application `signal_region` output identifies the only
+Region covered by its local rules and central bus. Each member forwarding module
+instance covers only its provider Region and requires `cloudtrail_mode = "create"` or
+`"existing"` before forwarding API-call events. Snapshot reconciliation covers
+onboarded Regions that do not have a hot path.
+
+For an existing VPC, set `existing_private_subnet_egress_mode` to `nat_gateway`,
+`transit_gateway`, or `vpc_endpoints`. Route modes are checked against every supplied
+private subnet route table. Existing VPC mode requires both `enableDnsSupport` and
+`enableDnsHostnames`. Endpoint mode requires an explicit endpoint ID for every AWS
+service path needed by inventory, ECR pulls, EKS nodes/Pod Identity, queues,
+object/table storage, logs, STS, and Secrets Manager. Terraform verifies VPC ownership,
+availability, partition-aware expected service names, interface private DNS, and
+S3/DynamoDB gateway route-table associations. AWS China service names are mapped
+individually because the required set mixes `com.amazonaws` and `cn.com.amazonaws`.
+Supply one attached security group for every interface endpoint; Terraform adds TCP/443
+ingress from its Lambda and EKS workload security groups. The operator must still verify
+that endpoint policies permit every required API action.
 
 Storage queue and dead-letter alarms are created regardless of action configuration.
 Lambda error, throttle, and inventory-outbox iterator-age alarms are created only when

@@ -4,7 +4,9 @@ import unittest
 
 from portscanner_generator.cancellation import (
     CancellationError,
+    cancel_event_scanner,
     cancel_older_scanners,
+    cancel_scanners_through_generation,
 )
 from portscanner_generator.config import GeneratorConfig
 from portscanner_generator.kubernetes import KubernetesScannerClient
@@ -164,6 +166,39 @@ class ScannerResourceTests(unittest.TestCase):
             scanner.listed_hashes,
             [target_hash(event.target.target_id)],
         )
+
+    def test_terminal_retry_deletes_exact_event_scanner(self) -> None:
+        event = parse_test_event(event_document())
+        name = scanner_name(event.event_id)
+        scanner = FakeScannerClient(
+            items=[scanner_item(event.target.target_id, event.target.generation, name)]
+        )
+
+        deleted = cancel_event_scanner(scanner, event_id=event.event_id)
+
+        self.assertTrue(deleted)
+        self.assertEqual(scanner.deleted, [name])
+
+    def test_unsafe_generation_cancellation_includes_siblings_not_newer_work(self) -> None:
+        event = parse_test_event(event_document())
+        scanner = FakeScannerClient(
+            items=[
+                scanner_item(event.target.target_id, 2, "older"),
+                scanner_item(event.target.target_id, 3, "sibling-a"),
+                scanner_item(event.target.target_id, 3, "sibling-b"),
+                scanner_item(event.target.target_id, 4, "newer"),
+            ]
+        )
+
+        result = cancel_scanners_through_generation(
+            scanner,
+            target_id=event.target.target_id,
+            unsafe_generation=3,
+        )
+
+        self.assertEqual(scanner.deleted, ["older", "sibling-a", "sibling-b"])
+        self.assertEqual(result.matched, 4)
+        self.assertEqual(result.deleted, 3)
 
     def test_malformed_matching_resource_fails_closed(self) -> None:
         event = parse_test_event(event_document())

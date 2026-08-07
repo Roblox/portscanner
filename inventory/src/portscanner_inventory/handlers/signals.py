@@ -79,7 +79,8 @@ def process_signal(
 
         changed = 0
         resolved_ids: set[str] = set()
-        for target in resolution.targets:
+        for raw_target in resolution.targets:
+            target = raw_target.with_observation(now)
             resolved_ids.add(target.target_id)
             result = state.reconcile(
                 target,
@@ -107,6 +108,7 @@ def process_signal(
                     request_id=hint.request_id,
                     event_time=hint.event_time,
                     candidate_ports=hint.candidate_ports,
+                    observed_at=now,
                 )
                 result = state.reconcile(
                     current,

@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 from portscanner_inventory.aws.ownership import OwnershipValidator
-from portscanner_inventory.base import OwnershipVerdict
+from portscanner_inventory.base import OwnershipVerdict, SnapshotScope
+from portscanner_inventory.events import build_target_event, snapshot_source
 from portscanner_inventory.state import TargetState
 
 from .helpers import AwsError, eni, normalized_target, permission, security_group
+
+NOW = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
 
 
 def _state(generation: int = 1) -> TargetState:
@@ -83,6 +87,23 @@ def test_stale_generation_short_circuits_without_ec2() -> None:
     result = _validator(StaticState(state), object()).validate(state.target_id, 1)
 
     assert result.verdict is OwnershipVerdict.STALE
+    assert result.current_generation == 2
+
+
+def test_removed_state_still_reports_superseding_generation() -> None:
+    state = _state(generation=2)
+    removed = TargetState(
+        target_id=state.target_id,
+        generation=state.generation,
+        status="removed",
+        target=state.target,
+        signature=state.signature,
+    )
+
+    result = _validator(StaticState(removed), object()).validate(state.target_id, 1)
+
+    assert result.verdict is OwnershipVerdict.STALE
+    assert result.current_generation == 2
 
 
 def test_moved_public_association_is_not_active() -> None:
@@ -159,3 +180,65 @@ def test_generation_change_during_validation_is_stale() -> None:
 
     assert result.verdict is OwnershipVerdict.STALE
     assert result.reason == "generation-race"
+    assert result.current_generation == 2
+
+
+def test_validate_event_compares_contract_context_to_final_live_target() -> None:
+    event_target = normalized_target()
+    source = snapshot_source(
+        SnapshotScope(source="aws-config", name="example-aggregator"),
+        NOW,
+    )
+    event = build_target_event(
+        event_target,
+        1,
+        source=source,
+        collected_at=NOW,
+    )
+    live_target = normalized_target(public_ip="203.0.113.99")
+    live_state = TargetState(
+        target_id=live_target.target_id,
+        generation=1,
+        status="active",
+        target=live_target,
+        signature=live_target.state_signature,
+    )
+
+    result = _validator(
+        StaticState(live_state),
+        Client(eni(public_ip=live_target.public_ip)),
+    ).validate_event(event)
+
+    assert result.verdict is OwnershipVerdict.STALE
+    assert result.reason == "event-context"
+    assert result.current is not None
+    assert result.current.public_ip == live_target.public_ip
+
+
+def test_validate_event_ignores_descriptive_tag_only_changes() -> None:
+    event_target = normalized_target(tags=[{"Key": "name", "Value": "before"}])
+    source = snapshot_source(
+        SnapshotScope(source="aws-config", name="example-aggregator"),
+        NOW,
+    )
+    event = build_target_event(
+        event_target,
+        1,
+        source=source,
+        collected_at=NOW,
+    )
+    live_target = normalized_target(tags=[{"Key": "name", "Value": "after"}])
+    live_state = TargetState(
+        target_id=live_target.target_id,
+        generation=1,
+        status="active",
+        target=live_target,
+        signature=live_target.state_signature,
+    )
+
+    result = _validator(
+        StaticState(live_state),
+        Client(eni(tags=[{"Key": "name", "Value": "after"}])),
+    ).validate_event(event)
+
+    assert result.verdict is OwnershipVerdict.ACTIVE

@@ -29,8 +29,8 @@ incorrect Findings. Deploy it with a smaller trust boundary than the assets it o
    compromised producer, or incomplete.
 3. **Scheduling boundary:** normalized work crosses from cloud data into a system
    capable of network access.
-4. **Kubernetes boundary:** the controller creates Jobs; scanner pods hold packet and
-   evidence-write capabilities.
+4. **Kubernetes boundary:** the controller creates Jobs; scanner pods hold network-egress
+   authority and evidence-write credentials.
 5. **Evidence boundary:** result objects and scanner output are untrusted parser input.
 6. **Finding boundary:** normalized state can trigger notifications or downstream
    operator action.
@@ -104,8 +104,8 @@ private network paths where appropriate, retention, and access logging.
 ### Compromised scanner pod
 
 Scanner pods use a dedicated service account with no provider inventory access,
-read-only root filesystem where supported, dropped capabilities except the minimum
-needed for the approved scan mode, resource limits, egress policy, and write-only
+read-only root filesystem where supported, all Linux capabilities dropped, resource
+limits, egress policy, and write-only
 evidence access scoped to an immutable prefix. Never mount deployment credentials or a
 kubeconfig.
 
@@ -131,7 +131,7 @@ Use distinct identities for:
 - migrations; and
 - Terraform deployment.
 
-Do not combine scanner packet capability with provider inventory reads. In hub/spoke
+Do not combine scanner network-egress authority with provider inventory reads. In hub/spoke
 mode, each spoke role restricts trusted principal, external conditions where supported,
 actions, Regions, and resources. Event forwarding does not grant dispatch authority.
 

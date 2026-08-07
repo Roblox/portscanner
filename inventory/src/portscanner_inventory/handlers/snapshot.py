@@ -38,15 +38,51 @@ def reconcile_snapshot(
 
     batch = backend.collect()
     source = snapshot_source(batch.scope, now)
-    counts = {action.value: 0 for action in ReconcileAction}
+    counts = {
+        action.value: 0 for action in ReconcileAction if action is not ReconcileAction.REVALIDATE
+    }
     observed_ids: set[str] = set()
+    revalidated = 0
 
-    for target in batch.targets:
+    for raw_target in batch.targets:
+        target = (
+            raw_target if raw_target.observed_at is not None else raw_target.with_observation(now)
+        )
         observed_ids.add(target.target_id)
-        result = state.reconcile(target, source=source, now=now)
+        target_source = snapshot_source(
+            batch.scope,
+            now,
+            observed_at=target.observed_at,
+        )
+        result = state.reconcile(target, source=target_source, now=now)
+        if result.action is ReconcileAction.REVALIDATE and result.state is not None:
+            revalidated += 1
+            revalidation = ownership.validate(
+                result.state.target_id,
+                result.state.generation,
+            )
+            if revalidation.verdict in {
+                OwnershipVerdict.INACTIVE,
+                OwnershipVerdict.MOVED,
+            }:
+                result = state.remove(result.state, source=source, now=now)
+            elif (
+                revalidation.verdict is OwnershipVerdict.STALE
+                and revalidation.current is not None
+                and revalidation.reason == "policy-or-lifecycle"
+            ):
+                live_target = revalidation.current.with_observation(now)
+                live_source = snapshot_source(batch.scope, now, observed_at=now)
+                result = state.reconcile(live_target, source=live_source, now=now)
+                if result.state is not None and result.state.signature == target.state_signature:
+                    state.confirm_config_versions(result.state, target, now=now)
+            elif revalidation.verdict is OwnershipVerdict.ACTIVE:
+                result = state.confirm_config_versions(result.state, target, now=now)
+            else:
+                counts[ReconcileAction.NOOP.value] += 1
+                continue
         counts[result.action.value] += 1
 
-    revalidated = 0
     if batch.complete:
         for current in state.list_current(batch.scope):
             if current.target_id in observed_ids:
@@ -56,8 +92,14 @@ def reconcile_snapshot(
             if check.verdict in {OwnershipVerdict.INACTIVE, OwnershipVerdict.MOVED}:
                 result = state.remove(current, source=source, now=now)
                 counts[result.action.value] += 1
-            elif check.verdict is OwnershipVerdict.STALE and check.current is not None:
-                result = state.reconcile(check.current, source=source, now=now)
+            elif (
+                check.verdict is OwnershipVerdict.STALE
+                and check.current is not None
+                and check.reason == "policy-or-lifecycle"
+            ):
+                live_target = check.current.with_observation(now)
+                live_source = snapshot_source(batch.scope, now, observed_at=now)
+                result = state.reconcile(live_target, source=live_source, now=now)
                 counts[result.action.value] += 1
 
     summary = {

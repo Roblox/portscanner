@@ -92,9 +92,45 @@ variable "collector_external_id" {
 }
 
 variable "enable_event_forwarding" {
-  description = "Activate filtered EC2 write-event forwarding. Disabled by default."
+  description = "Activate filtered EC2 hints in this provider region. Requires a created or explicitly referenced management CloudTrail."
   type        = bool
   default     = false
+}
+
+variable "cloudtrail_mode" {
+  description = "create provisions a member management trail, existing references a member or organization trail, and disabled forbids active API-event forwarding."
+  type        = string
+  default     = "disabled"
+
+  validation {
+    condition     = contains(["create", "existing", "disabled"], var.cloudtrail_mode)
+    error_message = "cloudtrail_mode must be create, existing, or disabled."
+  }
+}
+
+variable "existing_cloudtrail_arn" {
+  description = "Existing member or organization multi-region management trail ARN when cloudtrail_mode is existing."
+  type        = string
+  default     = null
+
+  validation {
+    condition = (
+      var.existing_cloudtrail_arn == null ||
+      can(regex("^arn:[^:]+:cloudtrail:[^:]+:[0-9]{12}:trail/.+$", var.existing_cloudtrail_arn))
+    )
+    error_message = "existing_cloudtrail_arn must be null or a CloudTrail trail ARN."
+  }
+}
+
+variable "cloudtrail_retention_days" {
+  description = "Current-object retention for a member trail created by this module."
+  type        = number
+  default     = 365
+
+  validation {
+    condition     = var.cloudtrail_retention_days >= 1
+    error_message = "cloudtrail_retention_days must be positive."
+  }
 }
 
 variable "central_event_bus_arn" {
@@ -153,7 +189,14 @@ locals {
       var.central_collector_principal_arn
     ])
   )
-  config_source_arn = "arn:${data.aws_partition.current.partition}:config:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:*"
+  config_source_arn      = "arn:${data.aws_partition.current.partition}:config:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:*"
+  cloudtrail_name        = "${var.name_prefix}-management"
+  created_cloudtrail_arn = "arn:${data.aws_partition.current.partition}:cloudtrail:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:trail/${local.cloudtrail_name}"
+  effective_cloudtrail_arn = (
+    var.cloudtrail_mode == "create" ? local.created_cloudtrail_arn :
+    var.cloudtrail_mode == "existing" ? var.existing_cloudtrail_arn :
+    null
+  )
 }
 
 resource "terraform_data" "member_validation" {
@@ -161,23 +204,23 @@ resource "terraform_data" "member_validation" {
 
   lifecycle {
     precondition {
-      condition = !var.enable_config_aggregation_authorization || (
+      condition = !var.enable_config_aggregation_authorization ? true : try(
         can(regex("^[0-9]{12}$", var.central_config_account_id)) &&
-        var.central_config_region != null &&
-        length(var.central_config_region) > 0
+        length(var.central_config_region) > 0,
+        false
       )
       error_message = "Config aggregation authorization requires a 12-digit central account ID and central region."
     }
 
     precondition {
-      condition = !var.create_collector_role || (
+      condition = !var.create_collector_role ? true : try(
         length(local.collector_principal_arns) > 0 &&
         alltrue([
           for arn in local.collector_principal_arns :
           can(regex("^arn:[^:]+:iam::[0-9]{12}:role/.+$", arn))
         ]) &&
-        var.collector_external_id != null &&
-        length(var.collector_external_id) >= 16
+        length(var.collector_external_id) >= 16,
+        false
       )
       error_message = "Collector role creation requires exact central IAM role ARNs and an external ID of at least 16 characters."
     }
@@ -185,9 +228,21 @@ resource "terraform_data" "member_validation" {
     precondition {
       condition = !var.enable_event_forwarding || (
         var.central_event_bus_arn != null &&
-        can(regex("^arn:[^:]+:events:[^:]+:[0-9]{12}:event-bus/.+$", var.central_event_bus_arn))
+        can(regex("^arn:[^:]+:events:[^:]+:[0-9]{12}:event-bus/.+$", var.central_event_bus_arn)) &&
+        var.cloudtrail_mode != "disabled"
       )
-      error_message = "Event forwarding requires an exact central custom event bus ARN."
+      error_message = "Event forwarding requires an exact central custom event bus ARN and cloudtrail_mode create or existing."
+    }
+
+    precondition {
+      condition = (
+        var.cloudtrail_mode == "existing" &&
+        var.existing_cloudtrail_arn != null
+        ) || (
+        var.cloudtrail_mode != "existing" &&
+        var.existing_cloudtrail_arn == null
+      )
+      error_message = "existing_cloudtrail_arn is required only when cloudtrail_mode is existing."
     }
   }
 }
@@ -420,8 +475,176 @@ resource "aws_config_configuration_recorder_status" "this" {
 resource "aws_config_aggregate_authorization" "central" {
   count = var.enable_config_aggregation_authorization ? 1 : 0
 
-  account_id = var.central_config_account_id
-  region     = var.central_config_region
+  account_id            = var.central_config_account_id
+  authorized_aws_region = var.central_config_region
+}
+
+resource "aws_s3_bucket" "cloudtrail" {
+  count = var.cloudtrail_mode == "create" ? 1 : 0
+
+  bucket_prefix = substr("${var.name_prefix}-cloudtrail-", 0, 37)
+  force_destroy = false
+}
+
+resource "aws_s3_bucket_public_access_block" "cloudtrail" {
+  count = var.cloudtrail_mode == "create" ? 1 : 0
+
+  bucket                  = aws_s3_bucket.cloudtrail[0].id
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+resource "aws_s3_bucket_ownership_controls" "cloudtrail" {
+  count = var.cloudtrail_mode == "create" ? 1 : 0
+
+  bucket = aws_s3_bucket.cloudtrail[0].id
+
+  rule {
+    object_ownership = "BucketOwnerEnforced"
+  }
+}
+
+resource "aws_s3_bucket_server_side_encryption_configuration" "cloudtrail" {
+  count = var.cloudtrail_mode == "create" ? 1 : 0
+
+  bucket = aws_s3_bucket.cloudtrail[0].id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+  }
+}
+
+resource "aws_s3_bucket_versioning" "cloudtrail" {
+  count = var.cloudtrail_mode == "create" ? 1 : 0
+
+  bucket = aws_s3_bucket.cloudtrail[0].id
+
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+resource "aws_s3_bucket_lifecycle_configuration" "cloudtrail" {
+  count = var.cloudtrail_mode == "create" ? 1 : 0
+
+  bucket = aws_s3_bucket.cloudtrail[0].id
+
+  rule {
+    id     = "cloudtrail-retention"
+    status = "Enabled"
+    filter {}
+
+    expiration {
+      days = var.cloudtrail_retention_days
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = 30
+    }
+  }
+
+  depends_on = [aws_s3_bucket_versioning.cloudtrail]
+}
+
+data "aws_iam_policy_document" "cloudtrail_bucket" {
+  count = var.cloudtrail_mode == "create" ? 1 : 0
+
+  statement {
+    sid    = "DenyInsecureTransport"
+    effect = "Deny"
+
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+
+    actions = ["s3:*"]
+    resources = [
+      aws_s3_bucket.cloudtrail[0].arn,
+      "${aws_s3_bucket.cloudtrail[0].arn}/*"
+    ]
+
+    condition {
+      test     = "Bool"
+      variable = "aws:SecureTransport"
+      values   = ["false"]
+    }
+  }
+
+  statement {
+    sid    = "CloudTrailAclCheck"
+    effect = "Allow"
+
+    principals {
+      type        = "Service"
+      identifiers = ["cloudtrail.amazonaws.com"]
+    }
+
+    actions   = ["s3:GetBucketAcl"]
+    resources = [aws_s3_bucket.cloudtrail[0].arn]
+
+    condition {
+      test     = "ArnEquals"
+      variable = "aws:SourceArn"
+      values   = [local.created_cloudtrail_arn]
+    }
+  }
+
+  statement {
+    sid    = "CloudTrailWrite"
+    effect = "Allow"
+
+    principals {
+      type        = "Service"
+      identifiers = ["cloudtrail.amazonaws.com"]
+    }
+
+    actions   = ["s3:PutObject"]
+    resources = ["${aws_s3_bucket.cloudtrail[0].arn}/AWSLogs/${data.aws_caller_identity.current.account_id}/*"]
+
+    condition {
+      test     = "StringEquals"
+      variable = "s3:x-amz-acl"
+      values   = ["bucket-owner-full-control"]
+    }
+
+    condition {
+      test     = "ArnEquals"
+      variable = "aws:SourceArn"
+      values   = [local.created_cloudtrail_arn]
+    }
+  }
+}
+
+resource "aws_s3_bucket_policy" "cloudtrail" {
+  count = var.cloudtrail_mode == "create" ? 1 : 0
+
+  bucket = aws_s3_bucket.cloudtrail[0].id
+  policy = data.aws_iam_policy_document.cloudtrail_bucket[0].json
+
+  depends_on = [aws_s3_bucket_public_access_block.cloudtrail]
+}
+
+resource "aws_cloudtrail" "management" {
+  count = var.cloudtrail_mode == "create" ? 1 : 0
+
+  name                          = local.cloudtrail_name
+  s3_bucket_name                = aws_s3_bucket.cloudtrail[0].id
+  include_global_service_events = true
+  is_multi_region_trail         = true
+  enable_log_file_validation    = true
+  enable_logging                = true
+
+  event_selector {
+    include_management_events = true
+    read_write_type           = "All"
+  }
+
+  depends_on = [aws_s3_bucket_policy.cloudtrail]
 }
 
 data "aws_iam_policy_document" "collector_assume" {
@@ -475,7 +698,7 @@ resource "aws_cloudwatch_event_rule" "ec2_hint" {
   }
 
   name          = local.rule_names[each.key]
-  description   = "Forward supported EC2 ${each.key} inventory hints to the central bus"
+  description   = "Forward supported ${data.aws_region.current.region} EC2 ${each.key} inventory hints to the central bus"
   event_pattern = jsonencode(each.value)
   state         = var.enable_event_forwarding ? "ENABLED" : "DISABLED"
 }
@@ -551,4 +774,14 @@ output "forwarding_rule_arn" {
 
 output "forwarding_rule_arns" {
   value = { for kind, rule in aws_cloudwatch_event_rule.ec2_hint : kind => rule.arn }
+}
+
+output "cloudtrail_arn" {
+  description = "Created or explicitly referenced management trail supporting API-event forwarding."
+  value       = local.effective_cloudtrail_arn
+}
+
+output "signal_region" {
+  description = "Only this provider region's EventBridge hints are forwarded by this module instance."
+  value       = data.aws_region.current.region
 }

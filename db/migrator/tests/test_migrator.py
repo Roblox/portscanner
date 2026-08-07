@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 from act_migrator.config import database_settings_from_secret, require_tls
-from act_migrator.migrator import MigrationError, discover_migrations
+from act_migrator.migrator import MigrationError, discover_migrations, migration_set_checksum
 
 
 def _write_pair(root: Path, version: str, name: str, up: str, down: str) -> None:
@@ -23,6 +23,26 @@ def test_discovers_ordered_pairs_and_hashes_both_directions(tmp_path: Path) -> N
 
     (tmp_path / "000001_first.down.sql").write_text("SELECT 0;", encoding="utf-8")
     assert discover_migrations(tmp_path)[0].checksum != original_checksum
+
+
+def test_migration_set_checksum_binds_names_order_and_contents(tmp_path: Path) -> None:
+    _write_pair(tmp_path, "000001", "first", "SELECT 1;", "SELECT -1;")
+    original = migration_set_checksum(tmp_path)
+
+    (tmp_path / "000001_first.down.sql").write_text("SELECT 0;", encoding="utf-8")
+    assert migration_set_checksum(tmp_path) != original
+
+
+def test_rejects_symlinked_migration_files_from_checksum_and_discovery(tmp_path: Path) -> None:
+    source = tmp_path / "source.sql"
+    source.write_text("SELECT 1;", encoding="utf-8")
+    (tmp_path / "000001_link.up.sql").symlink_to(source)
+    (tmp_path / "000001_link.down.sql").symlink_to(source)
+
+    with pytest.raises(MigrationError, match="contains a symlink"):
+        migration_set_checksum(tmp_path)
+    with pytest.raises(MigrationError, match="contains a symlink"):
+        discover_migrations(tmp_path)
 
 
 def test_rejects_unpaired_and_malformed_migrations(tmp_path: Path) -> None:

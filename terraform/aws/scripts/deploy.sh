@@ -112,6 +112,15 @@ case "${STAGE}" in
     ;;
 esac
 
+case "${STAGE}" in
+  migrate | activate)
+    command -v aws >/dev/null 2>&1 || {
+      echo "AWS CLI is required for Helm exec authentication during ${STAGE}" >&2
+      exit 1
+    }
+    ;;
+esac
+
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/portable-portscanner.XXXXXX")"
 trap 'rm -rf "${WORK_DIR}"' EXIT
 PLAN_FILE="${WORK_DIR}/${STAGE}.tfplan"

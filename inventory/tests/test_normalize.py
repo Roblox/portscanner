@@ -60,8 +60,15 @@ def test_policy_fingerprint_is_order_independent_and_tracks_effective_rules() ->
 
 
 def test_normalizes_every_public_association_and_stable_identity() -> None:
+    interface = eni(secondary=[("10.0.0.11", "203.0.113.11")])
+    interface["PrivateIpAddresses"].append(
+        {
+            "PrivateIpAddress": "10.0.0.12",
+            "Association": {"PublicIp": "10.1.2.3"},
+        }
+    )
     values = normalize_network_interface(
-        eni(secondary=[("10.0.0.11", "203.0.113.11")]),
+        interface,
         account_id=ACCOUNT_ID,
         region=REGION,
         security_groups={SG_ID: [permission()]},
@@ -81,12 +88,13 @@ def test_only_allowlisted_tags_enter_normalized_context() -> None:
                 {"Key": "application", "Value": "sample"},
                 {"Key": "owner", "Value": "must-not-leak"},
                 {"Key": "name", "Value": "edge"},
+                {"Key": "environment", "Value": "   "},
             ]
         ),
         account_id=ACCOUNT_ID,
         region=REGION,
         security_groups={SG_ID: [permission()]},
-        allowed_tag_keys=("application", "name"),
+        allowed_tag_keys=("application", "environment", "name"),
     )[0]
 
     assert target.tags_dict == {"application": "sample", "name": "edge"}

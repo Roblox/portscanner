@@ -30,6 +30,12 @@ from portscanner_contracts import (
 from portscanner_inventory.aws.normalize import NormalizedTarget
 from portscanner_inventory.base import CandidatePorts, SnapshotScope
 
+PRIORITY_DISPATCH_WINDOW = timedelta(minutes=5)
+PRIORITY_EXECUTION_WINDOW = timedelta(minutes=30)
+MANUAL_DISPATCH_WINDOW = timedelta(minutes=10)
+COVERAGE_DISPATCH_WINDOW = timedelta(hours=2)
+COVERAGE_EXECUTION_WINDOW = timedelta(hours=6)
+
 
 @dataclass(frozen=True, slots=True)
 class EventSource:
@@ -46,9 +52,21 @@ def _utc(value: datetime) -> datetime:
     return value.astimezone(UTC)
 
 
-def snapshot_source(scope: SnapshotScope, collected_at: datetime) -> EventSource:
+def snapshot_source(
+    scope: SnapshotScope,
+    collected_at: datetime,
+    *,
+    observed_at: datetime | None = None,
+) -> EventSource:
     collected_at = _utc(collected_at)
-    identity = {"scope": scope.key, "collected_at": collected_at}
+    observation = _utc(observed_at or collected_at)
+    if observation > collected_at:
+        raise ValueError("snapshot observation cannot be later than collection")
+    identity = {
+        "scope": scope.key,
+        "observed_at": observation,
+        "collected_at": collected_at,
+    }
     event_id = deterministic_sha256("portscanner.inventory.snapshot.v1", identity)
     return EventSource(
         name=scope.source,
@@ -57,13 +75,16 @@ def snapshot_source(scope: SnapshotScope, collected_at: datetime) -> EventSource
             "portscanner.inventory.snapshot-request.v1",
             identity,
         ),
-        event_time=collected_at,
-        observed_at=collected_at,
+        event_time=observation,
+        observed_at=observation,
     )
 
 
 def signal_source(target: NormalizedTarget, collected_at: datetime) -> EventSource:
     collected_at = _utc(collected_at)
+    observed_at = _utc(target.observed_at or collected_at)
+    if observed_at > collected_at:
+        raise ValueError("signal observation cannot be later than collection")
     event_id = target.source_event_id
     if not target.source_event_name or not event_id:
         raise ValueError("signal target has no source identifiers")
@@ -71,15 +92,15 @@ def signal_source(target: NormalizedTarget, collected_at: datetime) -> EventSour
         "portscanner.inventory.signal-request.v1",
         {"event_id": event_id},
     )
-    event_time = _utc(target.source_event_time or collected_at)
-    if event_time > collected_at:
-        event_time = collected_at
+    event_time = _utc(target.source_event_time or observed_at)
+    if event_time > observed_at:
+        event_time = observed_at
     return EventSource(
         name=target.source_event_name,
         event_id=event_id,
         request_id=request_id,
         event_time=event_time,
-        observed_at=collected_at,
+        observed_at=observed_at,
     )
 
 
@@ -122,7 +143,7 @@ def _context(
     allowed_tags = {
         key: item
         for key, item in value.tags
-        if key in {"application", "environment", "name", "service"}
+        if key in {"application", "environment", "name", "service"} and item.strip()
     }
     return AwsContext(
         account_id=value.account_id,
@@ -184,32 +205,34 @@ def build_target_event(
         ranges = _ranges(candidate)
         profile = ScanProfile.FAST_FULL_TCP if candidate.full_tcp else ScanProfile.TARGETED_TCP
         priority = 200
-        deadline = collected_at + timedelta(minutes=5)
-        not_after = collected_at + timedelta(minutes=10)
+        deadline = collected_at + PRIORITY_DISPATCH_WINDOW
+        not_after = collected_at + PRIORITY_EXECUTION_WINDOW
         event_type = TargetEventType.POLICY_CHANGED
     elif reason is ScanReason.TARGET_CHANGE:
         candidate = CandidatePorts.full()
         ranges = (FULL_TCP_PORT_RANGE,)
         profile = ScanProfile.FAST_FULL_TCP
         priority = 200
-        deadline = collected_at + timedelta(minutes=5)
-        not_after = collected_at + timedelta(minutes=10)
+        deadline = collected_at + PRIORITY_DISPATCH_WINDOW
+        not_after = collected_at + PRIORITY_EXECUTION_WINDOW
         event_type = TargetEventType.TARGET_UPSERT
     elif reason is ScanReason.COVERAGE:
         candidate = CandidatePorts.full()
         ranges = (FULL_TCP_PORT_RANGE,)
         profile = ScanProfile.DEEP
         priority = 10
-        deadline = collected_at + timedelta(hours=2)
-        not_after = collected_at + timedelta(hours=6)
+        deadline = collected_at + COVERAGE_DISPATCH_WINDOW
+        not_after = collected_at + COVERAGE_EXECUTION_WINDOW
         event_type = TargetEventType.RESCAN_REQUESTED
     elif reason in {ScanReason.NEW_TARGET, ScanReason.MANUAL}:
         candidate = CandidatePorts.full()
         ranges = (FULL_TCP_PORT_RANGE,)
         profile = ScanProfile.FAST_FULL_TCP
         priority = 500 if reason is ScanReason.MANUAL else 100
-        deadline = collected_at + timedelta(minutes=10)
-        not_after = collected_at + timedelta(minutes=20)
+        deadline = collected_at + (
+            MANUAL_DISPATCH_WINDOW if reason is ScanReason.MANUAL else PRIORITY_DISPATCH_WINDOW
+        )
+        not_after = collected_at + PRIORITY_EXECUTION_WINDOW
         event_type = (
             TargetEventType.RESCAN_REQUESTED
             if reason is ScanReason.MANUAL

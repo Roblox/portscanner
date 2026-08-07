@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 [build-system]
-requires = ["hatchling>=1.27"]
+requires = ["hatchling==1.27.0"]
 build-backend = "hatchling.build"
 
 [project]
@@ -11,6 +11,7 @@ version = "0.1.0"
 description = "Typed public data contracts for Portscanner"
 requires-python = ">=3.12"
 license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "Roblox" }]
 classifiers = [
     "Development Status :: 3 - Alpha",

@@ -19,6 +19,7 @@ repos:
       - id: check-yaml
         args:
           - --unsafe
+        exclude: ^operator/chart/portscanner/templates/
       - id: debug-statements
       - id: detect-private-key
       - id: end-of-file-fixer
@@ -45,4 +46,4 @@ repos:
         entry: python3 -m unittest discover -s tools/tests -p test_*.py
         language: system
         pass_filenames: false
-        files: ^tools/(sanitize|tests/test_sanitize)
+        files: ^tools/(sanitize(?:-policy\.toml|\.py)|tests/test_sanitize\.py)$

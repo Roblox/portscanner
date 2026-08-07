@@ -8,7 +8,12 @@ on:
     paths:
       - "**/Dockerfile"
       - "**/*.dockerfile"
+      - ".dockerignore"
+      - "LICENSE"
+      - "NOTICE"
+      - "THIRD_PARTY_NOTICES.md"
       - "contracts/**"
+      - "db/migrations/**"
       - "db/migrator/**"
       - "generator/**"
       - "inventory/**"
@@ -20,6 +25,11 @@ on:
       - "**/pyproject.toml"
       - "**/go.mod"
       - "**/go.sum"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "tools/build_tracked_image.py"
+      - "tools/export_runtime_requirements.py"
+      - "tools/verify_python_image.py"
       - ".github/workflows/containers.yml"
   push:
     branches:
@@ -27,7 +37,12 @@ on:
     paths:
       - "**/Dockerfile"
       - "**/*.dockerfile"
+      - ".dockerignore"
+      - "LICENSE"
+      - "NOTICE"
+      - "THIRD_PARTY_NOTICES.md"
       - "contracts/**"
+      - "db/migrations/**"
       - "db/migrator/**"
       - "generator/**"
       - "inventory/**"
@@ -39,6 +54,11 @@ on:
       - "**/pyproject.toml"
       - "**/go.mod"
       - "**/go.sum"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "tools/build_tracked_image.py"
+      - "tools/export_runtime_requirements.py"
+      - "tools/verify_python_image.py"
       - ".github/workflows/containers.yml"
 
 permissions:
@@ -76,16 +96,45 @@ jobs:
               "operator/Dockerfile": "operator",
               "scanner/nmap/Dockerfile": ".",
           }
+          python_images = {
+              "db/migrator/Dockerfile": (
+                  "db/migrator/requirements-runtime.txt",
+                  "portscanner-migrator",
+              ),
+              "generator/Dockerfile": (
+                  "generator/requirements-runtime.txt",
+                  "portscanner-contracts portscanner-inventory portscanner-generator",
+              ),
+              "inventory/Dockerfile": (
+                  "inventory/requirements-runtime.txt",
+                  "portscanner-contracts portscanner-inventory",
+              ),
+              "parser/Dockerfile": (
+                  "parser/requirements-runtime.txt",
+                  "portscanner-contracts portscanner-parser",
+              ),
+              "processor/Dockerfile": (
+                  "processor/requirements-runtime.txt",
+                  "portscanner-contracts portscanner-parser portscanner-processor",
+              ),
+              "scanner/nmap/Dockerfile": (
+                  "scanner/nmap/requirements-runtime.txt",
+                  "portscanner-contracts portscanner-scanner",
+              ),
+          }
           entries = []
           for index, dockerfile in enumerate(sorted(set(output.splitlines()))):
               if not re.fullmatch(r"[A-Za-z0-9_./-]+", dockerfile):
                   raise SystemExit(f"unsafe Dockerfile path: {dockerfile!r}")
               context = component_contexts.get(dockerfile, ".")
+              requirements, distributions = python_images.get(dockerfile, ("", ""))
               entries.append(
                   {
                       "dockerfile": dockerfile,
                       "context": context,
                       "image": f"portscanner-ci:component-{index}",
+                      "runtime_requirements": requirements,
+                      "distributions": distributions,
                   }
               )
 
@@ -118,11 +167,41 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          docker build \
-            --pull \
-            --file "${DOCKERFILE}" \
-            --tag "${IMAGE}" \
-            "${BUILD_CONTEXT}"
+          python3 tools/build_tracked_image.py \
+            --dockerfile "${DOCKERFILE}" \
+            --context "${BUILD_CONTEXT}" \
+            --tag "${IMAGE}"
+
+      - name: Verify Python runtime lock and licenses
+        if: matrix.runtime_requirements != ''
+        env:
+          DISTRIBUTIONS: ${{ matrix.distributions }}
+          IMAGE: ${{ matrix.image }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          arguments=()
+          for distribution in ${DISTRIBUTIONS}; do
+            arguments+=(--distribution "${distribution}")
+          done
+          python3 tools/verify_python_image.py "${IMAGE}" "${arguments[@]}"
+
+      - name: Verify non-root scanner TCP connect scan
+        if: matrix.dockerfile == 'scanner/nmap/Dockerfile'
+        env:
+          IMAGE: ${{ matrix.image }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --interactive \
+            --network none \
+            --user 65532:65532 \
+            --read-only \
+            --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+            --cap-drop ALL \
+            --security-opt no-new-privileges=true \
+            --entrypoint python \
+            "${IMAGE}" - <scanner/nmap/tests/test_nmap_connect_smoke.py
 
       - name: Scan image with Trivy
         uses: aquasecurity/trivy-action@v0.36.0

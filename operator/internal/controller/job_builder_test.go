@@ -89,18 +89,18 @@ func TestScannerArgumentsMapProfilesAndCoverage(t *testing.T) {
 	}
 }
 
-func TestActiveDeadlineUsesEarlierExpiry(t *testing.T) {
+func TestActiveDeadlineUsesAbsoluteNotAfterCutoff(t *testing.T) {
 	now := time.Date(2026, time.August, 5, 20, 0, 0, 0, time.UTC)
 	spec := validScanner(now).Spec
-	spec.Deadline = metav1.NewTime(now.Add(10 * time.Minute))
-	spec.NotAfter = metav1.NewTime(now.Add(90 * time.Second))
+	spec.Deadline = metav1.NewTime(now.Add(90 * time.Second))
+	spec.NotAfter = metav1.NewTime(now.Add(10 * time.Minute))
 
 	got, err := activeDeadlineSeconds(spec, now)
 	if err != nil {
 		t.Fatalf("activeDeadlineSeconds() error = %v", err)
 	}
-	if got != 90 {
-		t.Fatalf("activeDeadlineSeconds() = %d, want 90", got)
+	if got != 600 {
+		t.Fatalf("activeDeadlineSeconds() = %d, want 600", got)
 	}
 
 	spec.NotAfter = metav1.NewTime(now)
@@ -137,6 +137,9 @@ func TestBuildJobSecurityContextAndCorrelation(t *testing.T) {
 		*job.Spec.TTLSecondsAfterFinished != scanner.Spec.TTLSecondsAfterFinished {
 		t.Fatal("TTL control was not mapped to the Job")
 	}
+	if job.Spec.ActiveDeadlineSeconds == nil || *job.Spec.ActiveDeadlineSeconds != 600 {
+		t.Fatalf("activeDeadlineSeconds = %v, want 600 from notAfter", job.Spec.ActiveDeadlineSeconds)
+	}
 	if !safeIdentifierPattern.MatchString(job.Name) {
 		t.Fatalf("Job-derived run ID %q is not scanner-safe", job.Name)
 	}
@@ -168,11 +171,14 @@ func TestBuildJobSecurityContextAndCorrelation(t *testing.T) {
 	if security.ReadOnlyRootFilesystem == nil || !*security.ReadOnlyRootFilesystem {
 		t.Fatal("container root filesystem must be read-only")
 	}
+	if security.Privileged != nil && *security.Privileged {
+		t.Fatal("scanner container must not use Kubernetes privileged mode")
+	}
 	if !reflect.DeepEqual(security.Capabilities.Drop, []corev1.Capability{"ALL"}) {
 		t.Fatalf("dropped capabilities = %#v, want ALL", security.Capabilities.Drop)
 	}
-	if !reflect.DeepEqual(security.Capabilities.Add, []corev1.Capability{"NET_RAW"}) {
-		t.Fatalf("added capabilities = %#v, want NET_RAW only", security.Capabilities.Add)
+	if len(security.Capabilities.Add) != 0 {
+		t.Fatalf("added capabilities = %#v, want none", security.Capabilities.Add)
 	}
 	if _, ok := container.Resources.Limits[corev1.ResourceEphemeralStorage]; !ok {
 		t.Fatal("ephemeral-storage limit is missing")
@@ -202,6 +208,8 @@ func TestBuildJobSecurityContextAndCorrelation(t *testing.T) {
 		"PORTSCANNER_TARGET_PRIVATE_ADDRESS",
 		"PORTSCANNER_TARGET_GENERATION",
 		"PORTSCANNER_IMAGE_VERSION",
+		"PORTSCANNER_DEADLINE_AT",
+		"PORTSCANNER_NOT_AFTER",
 		"PORTSCANNER_RESULT_BUCKET",
 		"PORTSCANNER_RESULT_PREFIX",
 	} {
@@ -340,6 +348,23 @@ func TestScannerSpecRejectsUnsafeOrIncompleteTargetIdentity(t *testing.T) {
 				spec.DirectiveID = ""
 			},
 		},
+		{
+			name: "too many combined coverage terms",
+			mutate: func(spec *scanningv1alpha1.ScannerSpec) {
+				spec.Ports = make([]int32, maxCoverageTerms/2)
+				for index := range spec.Ports {
+					spec.Ports[index] = int32(index + 1)
+				}
+				spec.Ranges = make(
+					[]scanningv1alpha1.PortRange,
+					maxCoverageTerms-len(spec.Ports)+1,
+				)
+				for index := range spec.Ranges {
+					port := int32(1_000 + index*2)
+					spec.Ranges[index] = scanningv1alpha1.PortRange{Start: port, End: port}
+				}
+			},
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -349,6 +374,37 @@ func TestScannerSpecRejectsUnsafeOrIncompleteTargetIdentity(t *testing.T) {
 				t.Fatal("validateScannerSpec() accepted invalid input")
 			}
 		})
+	}
+}
+
+func TestScannerSpecAcceptsTargetChangeReason(t *testing.T) {
+	spec := validScanner(time.Now().UTC()).Spec
+	spec.Reason = scanningv1alpha1.ReasonTargetChange
+	if err := validateScannerSpec(spec); err != nil {
+		t.Fatalf("validateScannerSpec() rejected target_change: %v", err)
+	}
+}
+
+func TestExplicitPortCoverageCapsNormalizedTerms(t *testing.T) {
+	spec := validScanner(time.Now().UTC()).Spec
+	spec.Profile = scanningv1alpha1.ProfileTargetedTCP
+	spec.Ports = make([]int32, maxCoverageTerms+1)
+	for index := range spec.Ports {
+		spec.Ports[index] = int32(index*2 + 1)
+	}
+	if _, err := explicitPortCoverage(spec); err == nil {
+		t.Fatal("explicitPortCoverage() accepted more than 256 normalized terms")
+	}
+
+	for index := range spec.Ports {
+		spec.Ports[index] = int32(index + 1)
+	}
+	got, err := explicitPortCoverage(spec)
+	if err != nil {
+		t.Fatalf("explicitPortCoverage() rejected one normalized term: %v", err)
+	}
+	if got != "1-257" {
+		t.Fatalf("explicitPortCoverage() = %q, want 1-257", got)
 	}
 }
 
@@ -402,7 +458,7 @@ func validJobConfig() JobConfig {
 		ResultPrefix:            "scans/",
 		HighPriorityClassName:   "high-scans",
 		NormalPriorityClassName: "normal-scans",
-		HighPriorityThreshold:   500,
+		HighPriorityThreshold:   100,
 		Resources: corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{
 				corev1.ResourceCPU:              resource.MustParse("100m"),

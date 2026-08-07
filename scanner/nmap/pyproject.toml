@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: MIT
 
 [build-system]
-requires = ["hatchling>=1.27"]
+requires = ["hatchling==1.27.0"]
 build-backend = "hatchling.build"
 
 [project]
@@ -11,7 +11,8 @@ version = "0.1.0"
 description = "Single-target hardened Nmap VERIFY worker"
 readme = "README.md"
 requires-python = ">=3.12"
-license = { text = "MIT" }
+license = "MIT"
+license-files = ["LICENSE"]
 dependencies = [
   "boto3>=1.36",
   "defusedxml>=0.7.1",

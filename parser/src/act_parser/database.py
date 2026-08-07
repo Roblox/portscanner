@@ -14,7 +14,14 @@ from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
 from .contracts import ContractValidationError, validate_finding
-from .models import MAX_PORT, CoverageDeclaration, Observation, ScanEnvelope, TargetEvent
+from .models import (
+    MAX_PORT,
+    CoverageDeclaration,
+    Observation,
+    ScanEnvelope,
+    TargetEvent,
+    parse_address,
+)
 
 
 class DataInvariantError(RuntimeError):
@@ -69,6 +76,18 @@ def _timestamp(value: datetime) -> str:
     return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
 
 
+def _target_addresses(event: TargetEvent) -> list[str]:
+    try:
+        addresses = [parse_address(address) for address in event.addresses]
+    except ValueError as error:
+        raise DataInvariantError("target event contains an invalid address binding") from error
+    if event.event_type == "remove" and addresses:
+        raise DataInvariantError("target removal cannot retain an address binding")
+    if event.event_type == "upsert" and not addresses:
+        raise DataInvariantError("active target event requires an address binding")
+    return addresses
+
+
 @dataclass(frozen=True, slots=True)
 class IngestResult:
     duplicate: bool
@@ -99,7 +118,7 @@ class Repository:
         finding_bucket: str | None = None,
     ) -> bool:
         """Apply one inventory event; return False for an already-seen event."""
-        addresses = [str(address) for address in event.addresses]
+        addresses = _target_addresses(event)
         source_event_time = event.source_event_time or event.source_observed_at
         source_collected_at = event.source_collected_at or event.source_observed_at
         dispatched_at = event.dispatched_at or source_collected_at
@@ -118,6 +137,8 @@ class Repository:
             ).fetchone()
             accepted = False
             stale = False
+            address_binding_changed = False
+            generation_gap_reactivation = False
             if target is None:
                 accepted = True
                 status = "removed" if event.event_type == "remove" else "active"
@@ -177,6 +198,16 @@ class Repository:
                 )
                 stale = not accepted
                 if accepted:
+                    previous_addresses = {str(address) for address in target["current_addresses"]}
+                    generation_gap_reactivation = (
+                        event.event_type == "upsert"
+                        and event.scan_reason == "new_target"
+                        and target["status"] == "active"
+                        and event.generation > target["current_generation"] + 1
+                    )
+                    address_binding_changed = (
+                        event.event_type == "upsert" and previous_addresses != set(addresses)
+                    )
                     status = "removed" if event.event_type == "remove" else "active"
                     removed_at = removal_time if status == "removed" else None
                     self.connection.execute(
@@ -221,12 +252,13 @@ class Repository:
                     source_observed_at,
                     source_collected_at,
                     dispatched_at,
+                    removed_at,
                     accepted,
                     stale
                 )
                 VALUES (
                     %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s::INET[], %s, %s, %s, %s, %s, %s, %s
+                    %s::INET[], %s, %s, %s, %s, %s, %s, %s, %s
                 )
                 """,
                 (
@@ -244,6 +276,7 @@ class Repository:
                     event.source_observed_at,
                     source_collected_at,
                     dispatched_at,
+                    removal_time if event.event_type == "remove" else None,
                     accepted,
                     stale,
                 ),
@@ -275,6 +308,16 @@ class Repository:
                     event,
                     finding_bucket=finding_bucket,
                 )
+            elif accepted and generation_gap_reactivation:
+                self._close_for_generation_gap_reactivation(
+                    event,
+                    finding_bucket=finding_bucket,
+                )
+            elif accepted and address_binding_changed:
+                self._close_for_address_binding_change(
+                    event,
+                    finding_bucket=finding_bucket,
+                )
         return True
 
     def ingest_scan(
@@ -289,6 +332,7 @@ class Repository:
         raw_result_version: str | None,
         enrichment_result_version: str | None,
         finding_bucket: str,
+        xml_completion_validated: bool,
     ) -> IngestResult:
         handoff_keys: list[str] = []
         with self.connection.transaction():
@@ -376,6 +420,7 @@ class Repository:
                 and target["status"] == "active"
                 and address_current
                 and envelope.outcome == "complete"
+                and xml_completion_validated
             )
             raw = envelope.raw_result
             enrichment = envelope.enrichment_result
@@ -417,6 +462,7 @@ class Repository:
                     enrichment_result_key,
                     enrichment_result_version,
                     enrichment_result_sha256,
+                    xml_completion_validated,
                     stale_generation,
                     state_eligible
                 )
@@ -424,7 +470,7 @@ class Repository:
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::INET,
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, %s
                 )
                 """,
                 (
@@ -463,6 +509,7 @@ class Repository:
                     None if enrichment is None else enrichment.key,
                     enrichment_result_version,
                     None if enrichment is None else enrichment.sha256,
+                    xml_completion_validated,
                     stale_generation,
                     state_eligible,
                 ),
@@ -604,14 +651,15 @@ class Repository:
         transitions: dict[tuple[str, int], str] = {}
 
         for key in sorted(observed):
+            if not self._attempt_controls_port(envelope, *key):
+                continue
             observation = observed[key]
             if observation.state == "open":
-                transition = self._open_exposure(envelope, observation)
-                affected.add(key)
+                applied, transition = self._open_exposure(envelope, observation)
             elif observation.state in {"closed", "filtered"} and self._covered(
                 envelope.coverage, *key
             ):
-                transition = self._close_exposure(
+                applied, transition = self._close_exposure(
                     target_id=envelope.target_id,
                     generation=envelope.generation,
                     protocol=observation.protocol,
@@ -623,25 +671,31 @@ class Repository:
                     ),
                 )
             else:
+                applied = False
                 transition = None
-            if transition is not None:
+            if applied:
                 affected.add(key)
+            if transition is not None:
                 transitions[key] = transition
 
-        open_rows = self.connection.execute(
+        state_rows = self.connection.execute(
             """
             SELECT protocol, port
             FROM act.exposure_state
-            WHERE target_id = %s AND state = 'open'
+            WHERE target_id = %s
             FOR UPDATE
             """,
             (envelope.target_id,),
         ).fetchall()
-        for row in open_rows:
+        for row in state_rows:
             key = (row["protocol"], row["port"])
-            if key in observed or not self._covered(envelope.coverage, *key):
+            if (
+                key in observed
+                or not self._covered(envelope.coverage, *key)
+                or not self._attempt_controls_port(envelope, *key)
+            ):
                 continue
-            transition = self._close_exposure(
+            applied, transition = self._close_exposure(
                 target_id=envelope.target_id,
                 generation=envelope.generation,
                 protocol=key[0],
@@ -650,8 +704,9 @@ class Repository:
                 occurred_at=envelope.scan_completed_at,
                 reason="coverage_absence",
             )
-            if transition is not None:
+            if applied:
                 affected.add(key)
+            if transition is not None:
                 transitions[key] = transition
         return affected, transitions
 
@@ -663,11 +718,55 @@ class Repository:
     ) -> bool:
         return any(item.contains(protocol, port) for item in coverage)
 
+    def _attempt_controls_port(
+        self,
+        envelope: ScanEnvelope,
+        protocol: str,
+        port: int,
+    ) -> bool:
+        winner = self.connection.execute(
+            """
+            SELECT attempt.attempt_id
+            FROM act.scan_attempts AS attempt
+            JOIN act.scan_attempt_coverage AS coverage
+              ON coverage.attempt_id = attempt.attempt_id
+            WHERE attempt.target_id = %s
+              AND attempt.generation = %s
+              AND attempt.state_eligible
+              AND coverage.complete
+              AND coverage.protocol = %s
+              AND coverage.port_from IS NOT NULL
+              AND %s BETWEEN coverage.port_from AND coverage.port_to
+            ORDER BY
+                attempt.scan_completed_at DESC,
+                attempt.attempt_id COLLATE "C" DESC
+            LIMIT 1
+            """,
+            (envelope.target_id, envelope.generation, protocol, port),
+        ).fetchone()
+        return winner is not None and winner["attempt_id"] == envelope.attempt_id
+
+    @staticmethod
+    def _scan_evidence_is_newer(
+        row: Mapping[str, Any],
+        *,
+        generation: int,
+        occurred_at: datetime,
+        attempt_id: str,
+    ) -> bool:
+        last_generation = int(row["last_generation"])
+        if generation != last_generation:
+            return generation > last_generation
+        return (occurred_at, attempt_id) > (
+            row["last_confirmed_at"],
+            row["last_attempt_id"],
+        )
+
     def _open_exposure(
         self,
         envelope: ScanEnvelope,
         observation: Observation,
-    ) -> str | None:
+    ) -> tuple[bool, str | None]:
         row = self.connection.execute(
             """
             SELECT *
@@ -677,7 +776,22 @@ class Repository:
             """,
             (envelope.target_id, observation.protocol, observation.port),
         ).fetchone()
-        occurred_at = envelope.scan_completed_at
+        if row is not None and not self._scan_evidence_is_newer(
+            row,
+            generation=envelope.generation,
+            occurred_at=envelope.scan_completed_at,
+            attempt_id=envelope.attempt_id,
+        ):
+            return False, None
+        occurred_at = (
+            envelope.scan_completed_at
+            if row is None
+            else max(
+                envelope.scan_completed_at,
+                row["last_confirmed_at"],
+                row["last_changed_at"],
+            )
+        )
         event_type: str | None
         if row is None:
             event_type = "opened"
@@ -702,11 +816,12 @@ class Repository:
                     first_opened_at,
                     last_confirmed_at,
                     last_changed_at,
-                    last_attempt_id
+                    last_attempt_id,
+                    last_generation
                 )
                 VALUES (
                     %s, %s, %s, 'open', %s::INET, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s
                 )
                 """,
                 (
@@ -725,6 +840,7 @@ class Repository:
                     occurred_at,
                     occurred_at,
                     envelope.attempt_id,
+                    envelope.generation,
                 ),
             )
         elif row["state"] == "closed":
@@ -749,6 +865,7 @@ class Repository:
                     closed_at = NULL,
                     closure_reason = NULL,
                     last_attempt_id = %s,
+                    last_generation = %s,
                     state_version = state_version + 1
                 WHERE target_id = %s AND protocol = %s AND port = %s
                 """,
@@ -764,6 +881,7 @@ class Repository:
                     occurred_at,
                     occurred_at,
                     envelope.attempt_id,
+                    envelope.generation,
                     envelope.target_id,
                     observation.protocol,
                     observation.port,
@@ -793,6 +911,7 @@ class Repository:
                         ELSE last_changed_at
                     END,
                     last_attempt_id = %s,
+                    last_generation = %s,
                     state_version = state_version + CASE WHEN %s THEN 1 ELSE 0 END
                 WHERE target_id = %s AND protocol = %s AND port = %s
                 """,
@@ -809,6 +928,7 @@ class Repository:
                     event_type is not None,
                     occurred_at,
                     envelope.attempt_id,
+                    envelope.generation,
                     event_type is not None,
                     envelope.target_id,
                     observation.protocol,
@@ -816,7 +936,7 @@ class Repository:
                 ),
             )
             if event_type is None:
-                return None
+                return True, None
 
         event_key = stable_hash(
             "act-exposure-event-v1",
@@ -865,7 +985,7 @@ class Repository:
                 occurred_at,
             ),
         )
-        return event_type
+        return True, event_type
 
     def _close_exposure(
         self,
@@ -878,7 +998,7 @@ class Repository:
         occurred_at: datetime,
         reason: str,
         source_key: str | None = None,
-    ) -> str | None:
+    ) -> tuple[bool, str | None]:
         row = self.connection.execute(
             """
             SELECT *
@@ -888,26 +1008,62 @@ class Repository:
             """,
             (target_id, protocol, port),
         ).fetchone()
-        if row is None or row["state"] != "open":
-            return None
+        if row is None:
+            return False, None
+        if source_attempt_id is not None and not self._scan_evidence_is_newer(
+            row,
+            generation=generation,
+            occurred_at=occurred_at,
+            attempt_id=source_attempt_id,
+        ):
+            return False, None
+        if row["state"] != "open":
+            if source_attempt_id is None:
+                return False, None
+            self.connection.execute(
+                """
+                UPDATE act.exposure_state
+                SET last_confirmed_at = GREATEST(last_confirmed_at, %s),
+                    last_attempt_id = %s,
+                    last_generation = %s
+                WHERE target_id = %s AND protocol = %s AND port = %s
+                """,
+                (
+                    occurred_at,
+                    source_attempt_id,
+                    generation,
+                    target_id,
+                    protocol,
+                    port,
+                ),
+            )
+            return True, None
+
+        transition_at = max(
+            occurred_at,
+            row["last_confirmed_at"],
+            row["last_changed_at"],
+        )
 
         if source_attempt_id is None:
             self.connection.execute(
                 """
                 UPDATE act.exposure_state
                 SET state = 'closed',
-                    last_confirmed_at = GREATEST(last_confirmed_at, %s),
+                    last_confirmed_at = %s,
                     last_changed_at = %s,
                     closed_at = %s,
                     closure_reason = %s,
+                    last_generation = GREATEST(last_generation, %s),
                     state_version = state_version + 1
                 WHERE target_id = %s AND protocol = %s AND port = %s
                 """,
                 (
-                    occurred_at,
-                    occurred_at,
-                    occurred_at,
+                    transition_at,
+                    transition_at,
+                    transition_at,
                     reason,
+                    generation,
                     target_id,
                     protocol,
                     port,
@@ -918,20 +1074,22 @@ class Repository:
                 """
                 UPDATE act.exposure_state
                 SET state = 'closed',
-                    last_confirmed_at = GREATEST(last_confirmed_at, %s),
+                    last_confirmed_at = %s,
                     last_changed_at = %s,
                     closed_at = %s,
                     closure_reason = %s,
                     last_attempt_id = %s,
+                    last_generation = %s,
                     state_version = state_version + 1
                 WHERE target_id = %s AND protocol = %s AND port = %s
                 """,
                 (
-                    occurred_at,
-                    occurred_at,
-                    occurred_at,
+                    transition_at,
+                    transition_at,
+                    transition_at,
                     reason,
                     source_attempt_id,
+                    generation,
                     target_id,
                     protocol,
                     port,
@@ -982,10 +1140,10 @@ class Repository:
                 reason,
                 identity,
                 identity,
-                occurred_at,
+                transition_at,
             ),
         )
-        return "closed"
+        return True, "closed"
 
     def _reconcile_finding_keys(
         self,
@@ -1074,7 +1232,11 @@ class Repository:
                     (item for item in rules if item["rule_key"] == rule_key),
                     None,
                 )
-                reason = self._finding_resolution_reason(target["status"], exposure, rule)
+                reason = self._finding_resolution_reason(
+                    target["status"],
+                    exposure,
+                    rule,
+                )
                 handoff = self._resolve_finding(
                     finding=finding,
                     target_generation=target["current_generation"],
@@ -1168,6 +1330,21 @@ class Repository:
             exposure["port"],
         )
         identity = exposure["service_identity_sha256"].strip()
+        transition_at = max(
+            occurred_at,
+            exposure["first_opened_at"],
+            exposure["last_confirmed_at"],
+            exposure["last_changed_at"],
+            *(
+                ()
+                if existing is None
+                else (
+                    existing["first_opened_at"],
+                    existing["last_seen_at"],
+                    existing["last_changed_at"],
+                )
+            ),
+        )
         if existing is None:
             event_type = "opened"
             previous_status = None
@@ -1233,7 +1410,7 @@ class Repository:
             exposure["banner_sha256"],
             identity,
             exposure["last_confirmed_at"],
-            occurred_at,
+            transition_at,
             version,
             event_key,
         )
@@ -1289,7 +1466,7 @@ class Repository:
                     identity,
                     exposure["first_opened_at"],
                     exposure["last_confirmed_at"],
-                    occurred_at,
+                    transition_at,
                     version,
                     event_key,
                 ),
@@ -1339,7 +1516,7 @@ class Repository:
             source_key=source_key,
             source_attempt_id=source_attempt_id,
             service_identity_sha256=identity,
-            occurred_at=occurred_at,
+            occurred_at=transition_at,
         )
         if not queue_event_handoff:
             return None
@@ -1368,6 +1545,12 @@ class Repository:
         fingerprint = finding["fingerprint"].strip()
         identity = finding["service_identity_sha256"].strip()
         version = finding["finding_version"] + 1
+        transition_at = max(
+            occurred_at,
+            finding["first_opened_at"],
+            finding["last_seen_at"],
+            finding["last_changed_at"],
+        )
         event_key = stable_hash(
             "act-finding-event-v1",
             fingerprint,
@@ -1388,8 +1571,8 @@ class Repository:
             WHERE fingerprint = %s
             """,
             (
-                occurred_at,
-                occurred_at,
+                transition_at,
+                transition_at,
                 reason,
                 version,
                 event_key,
@@ -1414,7 +1597,7 @@ class Repository:
             source_key=source_key,
             source_attempt_id=source_attempt_id,
             service_identity_sha256=identity,
-            occurred_at=occurred_at,
+            occurred_at=transition_at,
         )
         if not queue_event_handoff:
             return None
@@ -1577,7 +1760,9 @@ class Repository:
         try:
             return dict(validate_finding(payload))
         except ContractValidationError as error:
-            raise DataInvariantError("finding payload failed the shared contract") from error
+            raise RuleConfigurationError(
+                "finding payload produced by editable detection policy failed the shared contract"
+            ) from error
 
     def _queue_finding_event(
         self,
@@ -1630,6 +1815,130 @@ class Repository:
             ),
         )
         return handoff_key
+
+    def _close_for_generation_gap_reactivation(
+        self,
+        event: TargetEvent,
+        *,
+        finding_bucket: str | None,
+    ) -> None:
+        keys = {
+            (row["protocol"], row["port"])
+            for row in self.connection.execute(
+                """
+                SELECT protocol, port
+                FROM act.exposure_state
+                WHERE target_id = %s AND state = 'open'
+                FOR UPDATE
+                """,
+                (event.target_id,),
+            ).fetchall()
+        }
+        keys.update(
+            (row["protocol"], row["port"])
+            for row in self.connection.execute(
+                """
+                SELECT protocol, port
+                FROM act.findings
+                WHERE target_id = %s AND status = 'open'
+                FOR UPDATE
+                """,
+                (event.target_id,),
+            ).fetchall()
+        )
+        if not keys:
+            return
+        if not finding_bucket:
+            raise DataInvariantError(
+                "finding bucket is required to publish generation-gap transitions"
+            )
+
+        for protocol, port in sorted(keys):
+            self._close_exposure(
+                target_id=event.target_id,
+                generation=event.generation,
+                protocol=protocol,
+                port=port,
+                source_attempt_id=None,
+                source_key=event.event_id,
+                occurred_at=event.source_observed_at,
+                reason="generation_gap_reactivation",
+            )
+        self._reconcile_finding_keys(
+            keys,
+            target_id=event.target_id,
+            source_kind="target_event",
+            source_key=event.event_id,
+            source_attempt_id=None,
+            occurred_at=event.source_observed_at,
+            finding_bucket=finding_bucket,
+            transition_types=dict.fromkeys(keys, "closed"),
+        )
+
+    def _close_for_address_binding_change(
+        self,
+        event: TargetEvent,
+        *,
+        finding_bucket: str | None,
+    ) -> None:
+        current_addresses = {parse_address(address) for address in event.addresses}
+        keys = {
+            (row["protocol"], row["port"])
+            for row in self.connection.execute(
+                """
+                SELECT protocol, port, observed_address
+                FROM act.exposure_state
+                WHERE target_id = %s AND state = 'open'
+                FOR UPDATE
+                """,
+                (event.target_id,),
+            ).fetchall()
+            if str(row["observed_address"]) not in current_addresses
+        }
+        keys.update(
+            (row["protocol"], row["port"])
+            for row in self.connection.execute(
+                """
+                SELECT protocol, port, observed_address
+                FROM act.findings
+                WHERE target_id = %s AND status = 'open'
+                FOR UPDATE
+                """,
+                (event.target_id,),
+            ).fetchall()
+            if str(row["observed_address"]) not in current_addresses
+        )
+        if not keys:
+            return
+        if not finding_bucket:
+            raise DataInvariantError(
+                "finding bucket is required to publish address-binding transitions"
+            )
+
+        transitions: dict[tuple[str, int], str] = {}
+        for protocol, port in sorted(keys):
+            _applied, transition = self._close_exposure(
+                target_id=event.target_id,
+                generation=event.generation,
+                protocol=protocol,
+                port=port,
+                source_attempt_id=None,
+                source_key=event.event_id,
+                occurred_at=event.source_observed_at,
+                reason="address_binding_changed",
+            )
+            if transition is not None:
+                transitions[(protocol, port)] = transition
+        self._reconcile_finding_keys(
+            keys,
+            target_id=event.target_id,
+            source_kind="target_event",
+            source_key=event.event_id,
+            source_attempt_id=None,
+            occurred_at=event.source_observed_at,
+            finding_bucket=finding_bucket,
+            transition_types=transitions,
+        )
 
     def _close_for_ownership_removal(
         self,
@@ -1740,7 +2049,6 @@ class Repository:
                         source_attempt_id=None,
                         occurred_at=now,
                         finding_bucket=finding_bucket,
-                        queue_event_handoffs=False,
                     )
                 )
 
@@ -1823,7 +2131,6 @@ class Repository:
         *,
         source_attempt_id: str | None = None,
         run_key: str | None = None,
-        limit: int = 1000,
     ) -> list[str]:
         rows = self.connection.execute(
             """
@@ -1833,9 +2140,8 @@ class Repository:
               AND (%s::TEXT IS NULL OR source_attempt_id = %s)
               AND (%s::TEXT IS NULL OR run_key = %s)
             ORDER BY created_at, handoff_key
-            LIMIT %s
             """,
-            (source_attempt_id, source_attempt_id, run_key, run_key, limit),
+            (source_attempt_id, source_attempt_id, run_key, run_key),
         ).fetchall()
         return [row["handoff_key"].strip() for row in rows]
 

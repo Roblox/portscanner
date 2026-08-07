@@ -93,9 +93,9 @@ variable "node_disk_size_gib" {
 }
 
 variable "bootstrap_cluster_creator_admin_permissions" {
-  description = "Allow the creating principal to install the initial chart. Replace with explicit operational access in mature environments."
+  description = "Retain EKS bootstrap creator administration in addition to explicit installer entries. Disabled by default."
   type        = bool
-  default     = true
+  default     = false
 }
 
 variable "generator_role_arn" {
@@ -112,6 +112,26 @@ variable "additional_api_client_security_group_ids" {
   description = "Additional private runner or VPN security groups allowed to reach the EKS API."
   type        = set(string)
   default     = []
+}
+
+variable "existing_interface_endpoint_security_group_ids" {
+  description = "Validated existing interface endpoint security groups that receive TCP/443 ingress from the EKS cluster security group."
+  type        = set(string)
+  default     = []
+}
+
+variable "installer_principal_arns" {
+  description = "IAM role or user ARNs granted explicit cluster-wide administration for Terraform Helm installation."
+  type        = set(string)
+  default     = []
+
+  validation {
+    condition = alltrue([
+      for arn in var.installer_principal_arns :
+      can(regex("^arn:[^:]+:iam::[0-9]{12}:(?:role|user)/.+$", arn))
+    ])
+    error_message = "installer_principal_arns must contain only IAM role or user ARNs, never STS session ARNs."
+  }
 }
 
 variable "generator_access_group" {
@@ -207,6 +227,7 @@ variable "results_bucket_name" {
 }
 
 data "aws_partition" "current" {}
+data "aws_region" "current" {}
 
 data "aws_ec2_instance_type" "node" {
   for_each = toset(var.node_instance_types)
@@ -246,6 +267,11 @@ resource "terraform_data" "node_validation" {
     }
 
     precondition {
+      condition     = !contains(var.installer_principal_arns, var.generator_role_arn)
+      error_message = "The generator role cannot also be an installer principal because EKS permits only one access entry per principal."
+    }
+
+    precondition {
       condition = alltrue([
         for instance_type in values(data.aws_ec2_instance_type.node) :
         contains(instance_type.supported_architectures, var.workload_architecture)
@@ -266,9 +292,10 @@ resource "terraform_data" "operator_validation" {
       condition = !var.install_operator || (
         can(regex("^sha256:[0-9a-f]{64}$", var.image_digests["operator"])) &&
         can(regex("^sha256:[0-9a-f]{64}$", var.image_digests["scanner"])) &&
-        length(var.migration_token) > 0
+        length(var.migration_token) > 0 &&
+        length(var.installer_principal_arns) > 0
       )
-      error_message = "install_operator requires operator/scanner digests and a completed migration token."
+      error_message = "install_operator requires operator/scanner digests, a completed migration token, and at least one explicit installer principal."
     }
 
     precondition {
@@ -367,6 +394,17 @@ resource "aws_vpc_security_group_ingress_rule" "api_client" {
   ip_protocol                  = "tcp"
 }
 
+resource "aws_vpc_security_group_ingress_rule" "existing_endpoint_eks_workloads" {
+  for_each = var.existing_interface_endpoint_security_group_ids
+
+  security_group_id            = each.value
+  referenced_security_group_id = aws_eks_cluster.this.vpc_config[0].cluster_security_group_id
+  description                  = "TLS from portscanner EKS workloads"
+  from_port                    = 443
+  to_port                      = 443
+  ip_protocol                  = "tcp"
+}
+
 data "aws_iam_policy_document" "node_assume" {
   statement {
     effect  = "Allow"
@@ -458,7 +496,10 @@ resource "aws_eks_node_group" "scanner" {
     workload = "scanner"
   }
 
-  depends_on = [aws_iam_role_policy_attachment.node]
+  depends_on = [
+    aws_iam_role_policy_attachment.node,
+    aws_vpc_security_group_ingress_rule.existing_endpoint_eks_workloads
+  ]
 }
 
 resource "aws_eks_addon" "pod_identity" {
@@ -487,15 +528,44 @@ resource "aws_eks_access_entry" "generator" {
   kubernetes_groups = [var.generator_access_group]
 }
 
-data "aws_eks_cluster_auth" "this" {
-  name = aws_eks_cluster.this.name
+resource "aws_eks_access_entry" "installer" {
+  for_each = var.installer_principal_arns
+
+  cluster_name  = aws_eks_cluster.this.name
+  principal_arn = each.value
+  type          = "STANDARD"
+}
+
+resource "aws_eks_access_policy_association" "installer_cluster_admin" {
+  for_each = var.installer_principal_arns
+
+  cluster_name  = aws_eks_cluster.this.name
+  principal_arn = each.value
+  policy_arn    = "arn:${data.aws_partition.current.partition}:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+
+  access_scope {
+    type = "cluster"
+  }
+
+  depends_on = [aws_eks_access_entry.installer]
 }
 
 provider "helm" {
   kubernetes = {
     host                   = aws_eks_cluster.this.endpoint
     cluster_ca_certificate = base64decode(aws_eks_cluster.this.certificate_authority[0].data)
-    token                  = data.aws_eks_cluster_auth.this.token
+    exec = {
+      api_version = "client.authentication.k8s.io/v1beta1"
+      command     = "aws"
+      args = [
+        "eks",
+        "get-token",
+        "--cluster-name",
+        aws_eks_cluster.this.name,
+        "--region",
+        data.aws_region.current.region
+      ]
+    }
   }
 }
 
@@ -556,6 +626,7 @@ resource "helm_release" "operator" {
   depends_on = [
     terraform_data.operator_validation,
     aws_eks_access_entry.generator,
+    aws_eks_access_policy_association.installer_cluster_admin,
     aws_eks_node_group.scanner,
     aws_eks_pod_identity_association.scanner,
     aws_vpc_security_group_ingress_rule.api_client

@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools"]
+requires = ["setuptools==80.9.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -7,7 +7,13 @@ name = "portscanner-processor"
 version = "0.1.0"
 description = "Scheduled ACT finding reconciliation and export"
 requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+classifiers = [
+    "Programming Language :: Python :: 3.12",
+]
 dependencies = [
+    "awslambdaric>=4,<5",
     "portscanner-parser",
     "boto3",
     "psycopg[binary]",

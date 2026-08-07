@@ -6,7 +6,7 @@ AWS_DIR="$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd -P)"
 EXPECTED_REPOSITORY_ROOT="$(CDPATH= cd -- "${AWS_DIR}/../.." && pwd -P)"
 
 usage() {
-  echo "usage: $0 [--dry-run] <terraform-application-or-example-root> <arm64|x86_64> [source-revision-or-tag]" >&2
+  echo "usage: $0 [--dry-run] <central-terraform-root> <arm64|x86_64> [source-revision-or-tag]" >&2
   exit 2
 }
 
@@ -59,7 +59,7 @@ case "${ARCHITECTURE}" in
   *) die "architecture must be arm64 or x86_64" ;;
 esac
 
-for required_command in git terraform aws docker jq python3; do
+for required_command in git terraform aws docker jq python3 tar; do
   require_command "${required_command}"
 done
 docker buildx version >/dev/null 2>&1 || die "Docker buildx is required"
@@ -72,9 +72,19 @@ fi
 [[ -d "${ROOT_CANDIDATE}" ]] || die "Terraform root does not exist: ${ROOT_ARG}"
 ROOT="$(CDPATH= cd -- "${ROOT_CANDIDATE}" && pwd -P)"
 
-if [[ "${ROOT}" != "${AWS_DIR}/application" && "$(dirname -- "${ROOT}")" != "${AWS_DIR}/examples" ]]; then
-  die "Terraform root must be terraform/aws/application or a direct child of terraform/aws/examples"
-fi
+case "${ROOT}" in
+  "${AWS_DIR}/application" | \
+    "${AWS_DIR}/examples/created-vpc" | \
+    "${AWS_DIR}/examples/existing-vpc" | \
+    "${AWS_DIR}/examples/multi-account-central")
+    ;;
+  "${AWS_DIR}/examples/member-account")
+    die "member-account is not a central image deployment root"
+    ;;
+  *)
+    die "Terraform root must be application, created-vpc, existing-vpc, or multi-account-central"
+    ;;
+esac
 [[ -f "${ROOT}/main.tf" ]] || die "${ROOT} is not a Terraform root with main.tf"
 
 REPOSITORY_ROOT="$(git -C "${EXPECTED_REPOSITORY_ROOT}" rev-parse --show-toplevel 2>/dev/null)" ||
@@ -88,26 +98,28 @@ HEAD_COMMIT="$(git -C "${REPOSITORY_ROOT}" rev-parse --verify 'HEAD^{commit}' 2>
 [[ "${HEAD_COMMIT}" =~ ^[0-9a-f]{40,64}$ ]] || die "HEAD is not a supported Git object ID"
 
 if [[ -n "${SOURCE_ARGUMENT}" ]]; then
-  [[ "${SOURCE_ARGUMENT}" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]] ||
-    die "source revision/tag must be a Docker-safe tag of at most 128 characters"
+  [[ "${SOURCE_ARGUMENT}" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,114}$ ]] ||
+    die "source revision/tag must be Docker-safe and at most 115 characters"
   [[ "$(printf '%s' "${SOURCE_ARGUMENT}" | tr '[:upper:]' '[:lower:]')" != "latest" ]] ||
     die "the mutable latest tag is forbidden"
   SOURCE_COMMIT="$(git -C "${REPOSITORY_ROOT}" rev-parse --verify "${SOURCE_ARGUMENT}^{commit}" 2>/dev/null)" ||
     die "source revision/tag does not resolve to a commit"
   [[ "${SOURCE_COMMIT}" == "${HEAD_COMMIT}" ]] ||
     die "source revision/tag must resolve to the checked-out HEAD"
-  SOURCE_TAG="${SOURCE_ARGUMENT}"
+  SOURCE_TAG_BASE="${SOURCE_ARGUMENT}"
 else
   SOURCE_COMMIT="${HEAD_COMMIT}"
-  SOURCE_TAG="${HEAD_COMMIT}"
+  SOURCE_TAG_BASE="${HEAD_COMMIT}"
 fi
+SOURCE_TAG="${SOURCE_TAG_BASE}-${ARCHITECTURE}"
 
-if [[ "${ALLOW_DIRTY}" != "true" ]]; then
-  WORKTREE_STATUS="$(git -C "${REPOSITORY_ROOT}" status --porcelain=v1 --untracked-files=all)"
-  [[ -z "${WORKTREE_STATUS}" ]] ||
-    die "source checkout is not clean; review and commit it, or set PORTSCANNER_ALLOW_DIRTY=true only for local testing"
-else
-  log "warning: PORTSCANNER_ALLOW_DIRTY=true; images may not reproduce source revision ${SOURCE_COMMIT}"
+WORKTREE_STATUS="$(git -C "${REPOSITORY_ROOT}" status --porcelain=v1 --untracked-files=all)"
+if [[ -n "${WORKTREE_STATUS}" ]]; then
+  [[ "${ALLOW_DIRTY}" == "true" ]] ||
+    die "source checkout is not clean; review and commit it before publishing"
+  [[ "${DRY_RUN}" == "true" ]] ||
+    die "PORTSCANNER_ALLOW_DIRTY is permitted only with --dry-run"
+  log "warning: dirty dry run; uncommitted files are excluded from build inputs"
 fi
 
 COMPONENTS=(
@@ -139,17 +151,22 @@ CONTEXTS=(
 )
 
 for index in "${!COMPONENTS[@]}"; do
-  [[ -f "${REPOSITORY_ROOT}/${DOCKERFILES[$index]}" ]] ||
+  git -C "${REPOSITORY_ROOT}" cat-file -e "${SOURCE_COMMIT}:${DOCKERFILES[$index]}" ||
     die "Dockerfile is missing for ${COMPONENTS[$index]}"
-  [[ -d "${REPOSITORY_ROOT}/${CONTEXTS[$index]}" ]] ||
-    die "build context is missing for ${COMPONENTS[$index]}"
+  if [[ "${CONTEXTS[$index]}" == "." ]]; then
+    git -C "${REPOSITORY_ROOT}" cat-file -e "${SOURCE_COMMIT}^{tree}" ||
+      die "repository build context is missing"
+  else
+    git -C "${REPOSITORY_ROOT}" cat-file -e "${SOURCE_COMMIT}:${CONTEXTS[$index]}" ||
+      die "build context is missing for ${COMPONENTS[$index]}"
+  fi
 done
 
 if ! REPOSITORY_URLS_JSON="$(terraform "-chdir=${ROOT}" output -json repository_urls)"; then
-  die "repository_urls output is unavailable; apply the foundation stage first"
+  die "repository_urls output is unavailable; apply this central root first"
 fi
 if ! DEPLOYMENT_STATE_JSON="$(terraform "-chdir=${ROOT}" output -json deployment_state)"; then
-  die "deployment_state output is unavailable; apply the foundation stage first"
+  die "deployment_state output is unavailable; apply this central root first"
 fi
 
 EXPECTED_COMPONENTS_JSON='["generator","inventory","migrator","operator","parser","processor","scanner"]'
@@ -160,13 +177,22 @@ if ! jq -e --argjson expected "${EXPECTED_COMPONENTS_JSON}" \
 fi
 if ! jq -e '
   type == "object"
-  and .runtime_created == false
-  and .migration_run == false
-  and .operator_installed == false
-  and .dispatch_enabled == false
+  and keys == ["dispatch_enabled", "migration_run", "operator_installed", "runtime_created"]
+  and all(.[]; type == "boolean")
+  and ((.migration_run == false) or .runtime_created)
+  and ((.operator_installed == false) or .migration_run)
+  and ((.dispatch_enabled == false) or .operator_installed)
 ' <<<"${DEPLOYMENT_STATE_JSON}" >/dev/null; then
-  die "Terraform output is not in the fully paused foundation stage"
+  die "deployment_state is malformed or violates staged deployment ordering"
 fi
+DEPLOYMENT_STAGE="$(jq -r '
+  if .dispatch_enabled then "active"
+  elif .operator_installed then "operator-installed"
+  elif .migration_run then "migrated"
+  elif .runtime_created then "runtime-paused"
+  else "foundation"
+  end
+' <<<"${DEPLOYMENT_STATE_JSON}")"
 
 REPOSITORY_URLS=()
 REPOSITORY_NAMES=()
@@ -214,7 +240,25 @@ for component in "${COMPONENTS[@]}"; do
   fi
 done
 
-MIGRATION_CHECKSUM="$(python3 - "${REPOSITORY_ROOT}/db/migrations" <<'PY'
+umask 077
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/portscanner-images.XXXXXX")"
+cleanup() {
+  rm -rf -- "${WORK_DIR}"
+}
+handle_signal() {
+  exit 130
+}
+trap cleanup EXIT
+trap handle_signal HUP INT TERM
+
+SOURCE_TREE="${WORK_DIR}/source"
+mkdir -p "${SOURCE_TREE}"
+if ! git -C "${REPOSITORY_ROOT}" archive --format=tar "${SOURCE_COMMIT}" |
+  tar -xf - -C "${SOURCE_TREE}"; then
+  die "could not create a committed-only build context"
+fi
+
+MIGRATION_CHECKSUM="$(python3 - "${SOURCE_TREE}/db/migrations" <<'PY'
 import hashlib
 import pathlib
 import sys
@@ -223,10 +267,11 @@ root = pathlib.Path(sys.argv[1])
 if not root.is_dir():
     raise SystemExit(f"migration directory is missing: {root}")
 
-paths = sorted(
-    (path for path in root.iterdir() if path.is_file() and not path.is_symlink()),
-    key=lambda path: path.name.encode("utf-8"),
-)
+entries = sorted(root.iterdir(), key=lambda path: path.name.encode("utf-8"))
+symlinks = [path.name for path in entries if path.is_symlink()]
+if symlinks:
+    raise SystemExit(f"migration directory contains a symlink: {symlinks[0]}")
+paths = [path for path in entries if path.is_file()]
 if not paths:
     raise SystemExit("migration directory contains no regular files")
 
@@ -260,7 +305,7 @@ else
   log "warning: this buildx version does not advertise SBOM support"
 fi
 
-log "validated paused foundation outputs at ${ROOT}"
+log "validated central deployment outputs at ${ROOT} (${DEPLOYMENT_STAGE})"
 log "source revision: ${SOURCE_COMMIT}"
 log "immutable image tag: ${SOURCE_TAG}"
 log "architecture mapping: ${ARCHITECTURE} -> ${PLATFORM}"
@@ -273,6 +318,11 @@ if [[ "${DRY_RUN}" == "true" ]]; then
   log "dry run complete; no AWS identity call, registry login, build, push, or digest output was performed"
   exit 0
 fi
+
+TRIVY_NAME="${TRIVY:-trivy}"
+TRIVY_BIN="$(command -v "${TRIVY_NAME}" || true)"
+[[ -n "${TRIVY_BIN}" ]] ||
+  die "Trivy is required to scan release digests before deployment output"
 
 AWS_REGION_VALUE="${AWS_REGION:-${AWS_DEFAULT_REGION:-}}"
 if [[ -z "${AWS_REGION_VALUE}" ]]; then
@@ -303,17 +353,6 @@ if [[ -z "${DOCKER_HOST:-}" ]]; then
   ACTIVE_DOCKER_HOST="$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null || true)"
 fi
 
-umask 077
-WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/portscanner-images.XXXXXX")"
-cleanup() {
-  rm -rf -- "${WORK_DIR}"
-}
-handle_signal() {
-  exit 130
-}
-trap cleanup EXIT
-trap handle_signal HUP INT TERM
-
 export DOCKER_CONFIG="${WORK_DIR}/docker-config"
 mkdir -p "${DOCKER_CONFIG}"
 printf '{}\n' >"${DOCKER_CONFIG}/config.json"
@@ -328,6 +367,45 @@ for index in "${!REGISTRIES[@]}"; do
     die "ECR authentication failed for ${REGISTRIES[$index]}"
   fi
 done
+
+lookup_existing_ecr_digest() {
+  local repository_name="$1"
+  local image_tag="$2"
+  local region="$3"
+  local response
+  local digest
+
+  if ! response="$(aws ecr list-images \
+    --region "${region}" \
+    --repository-name "${repository_name}" \
+    --filter tagStatus=TAGGED \
+    --output json)"; then
+    log "could not determine whether ${repository_name}:${image_tag} already exists"
+    return 2
+  fi
+
+  if digest="$(jq -er --arg image_tag "${image_tag}" '
+    select(
+      (.imageIds | type) == "array" and
+      ([.imageIds[] | select(.imageTag == $image_tag)] | length) == 1
+    ) |
+    [.imageIds[] | select(.imageTag == $image_tag)][0].imageDigest |
+    select(type == "string" and test("^sha256:[0-9a-f]{64}$"))
+  ' <<<"${response}")"; then
+    printf '%s' "${digest}"
+    return 0
+  fi
+
+  if jq -e --arg image_tag "${image_tag}" '
+    (.imageIds | type) == "array" and
+    ([.imageIds[] | select(.imageTag == $image_tag)] | length) == 0
+  ' <<<"${response}" >/dev/null; then
+    return 1
+  fi
+
+  log "ECR returned an unexpected lookup result for ${repository_name}:${image_tag}"
+  return 2
+}
 
 resolve_ecr_digest() {
   local repository_name="$1"
@@ -361,51 +439,75 @@ for index in "${!COMPONENTS[@]}"; do
   COMPONENT="${COMPONENTS[$index]}"
   METADATA_FILE="${WORK_DIR}/${COMPONENT}-metadata.json"
   IMAGE_REFERENCE="${REPOSITORY_URLS[$index]}:${SOURCE_TAG}"
-  BUILD_ARGS=(
-    buildx build
-    --pull
-    --platform "${PLATFORM}"
-    --file "${REPOSITORY_ROOT}/${DOCKERFILES[$index]}"
-    --tag "${IMAGE_REFERENCE}"
-    --label "org.opencontainers.image.revision=${SOURCE_COMMIT}"
-    --metadata-file "${METADATA_FILE}"
-    --push
-  )
-  if [[ "${COMPONENT}" == "operator" || "${COMPONENT}" == "scanner" ]]; then
-    [[ "${PROVENANCE_SUPPORTED}" == "false" ]] || BUILD_ARGS+=("--provenance=true")
-    [[ "${SBOM_SUPPORTED}" == "false" ]] || BUILD_ARGS+=("--sbom=true")
-  else
-    # Lambda requires a single-architecture image manifest. Attached BuildKit
-    # attestations turn a single-platform push into an OCI image index, which
-    # Lambda can reject even though the payload has only one runtime platform.
-    [[ "${PROVENANCE_SUPPORTED}" == "false" ]] || BUILD_ARGS+=("--provenance=false")
-    [[ "${SBOM_SUPPORTED}" == "false" ]] || BUILD_ARGS+=("--sbom=false")
-  fi
-  BUILD_ARGS+=("${REPOSITORY_ROOT}/${CONTEXTS[$index]}")
 
-  log "building and pushing ${COMPONENT} for ${PLATFORM}"
-  docker "${BUILD_ARGS[@]}" 1>&2
-
-  METADATA_DIGEST="$(jq -r '."containerimage.digest" // empty' "${METADATA_FILE}")"
-  if [[ -n "${METADATA_DIGEST}" && ! "${METADATA_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
-    die "build metadata returned an invalid digest for ${COMPONENT}"
-  fi
-
-  if ! ECR_DIGEST="$(resolve_ecr_digest \
+  if ECR_DIGEST="$(lookup_existing_ecr_digest \
     "${REPOSITORY_NAMES[$index]}" \
     "${SOURCE_TAG}" \
     "${REPOSITORY_REGIONS[$index]}")"; then
-    die "could not resolve a valid ECR digest for ${COMPONENT}"
+    log "reusing existing immutable ${COMPONENT} digest ${ECR_DIGEST}"
+  else
+    LOOKUP_STATUS=$?
+    if [[ "${LOOKUP_STATUS}" -ne 1 ]]; then
+      die "could not safely inspect the immutable tag for ${COMPONENT}"
+    fi
+
+    BUILD_ARGS=(
+      buildx build
+      --pull
+      --platform "${PLATFORM}"
+      --file "${SOURCE_TREE}/${DOCKERFILES[$index]}"
+      --tag "${IMAGE_REFERENCE}"
+      --label "org.opencontainers.image.revision=${SOURCE_COMMIT}"
+      --metadata-file "${METADATA_FILE}"
+      --push
+    )
+    if [[ "${COMPONENT}" == "operator" || "${COMPONENT}" == "scanner" ]]; then
+      [[ "${PROVENANCE_SUPPORTED}" == "false" ]] || BUILD_ARGS+=("--provenance=true")
+      [[ "${SBOM_SUPPORTED}" == "false" ]] || BUILD_ARGS+=("--sbom=true")
+    else
+      # Lambda requires a single-architecture image manifest. Attached BuildKit
+      # attestations turn a single-platform push into an OCI image index, which
+      # Lambda can reject even though the payload has only one runtime platform.
+      [[ "${PROVENANCE_SUPPORTED}" == "false" ]] || BUILD_ARGS+=("--provenance=false")
+      [[ "${SBOM_SUPPORTED}" == "false" ]] || BUILD_ARGS+=("--sbom=false")
+    fi
+    BUILD_ARGS+=("${SOURCE_TREE}/${CONTEXTS[$index]}")
+
+    log "building and pushing ${COMPONENT} for ${PLATFORM}"
+    docker "${BUILD_ARGS[@]}" 1>&2
+
+    METADATA_DIGEST="$(jq -r '."containerimage.digest" // empty' "${METADATA_FILE}")"
+    if [[ -n "${METADATA_DIGEST}" && ! "${METADATA_DIGEST}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+      die "build metadata returned an invalid digest for ${COMPONENT}"
+    fi
+
+    if ! ECR_DIGEST="$(resolve_ecr_digest \
+      "${REPOSITORY_NAMES[$index]}" \
+      "${SOURCE_TAG}" \
+      "${REPOSITORY_REGIONS[$index]}")"; then
+      die "could not resolve a valid ECR digest for ${COMPONENT}"
+    fi
+    if [[ -n "${METADATA_DIGEST}" && "${METADATA_DIGEST}" != "${ECR_DIGEST}" ]]; then
+      die "build metadata and ECR disagree on the ${COMPONENT} digest"
+    fi
   fi
-  if [[ -n "${METADATA_DIGEST}" && "${METADATA_DIGEST}" != "${ECR_DIGEST}" ]]; then
-    die "build metadata and ECR disagree on the ${COMPONENT} digest"
-  fi
+
+  log "scanning immutable ${COMPONENT} digest ${ECR_DIGEST}"
+  "${TRIVY_BIN}" image \
+    --scanners vuln \
+    --ignore-unfixed \
+    --severity HIGH,CRITICAL \
+    --exit-code 1 \
+    --no-progress \
+    --platform "${PLATFORM}" \
+    "${REPOSITORY_URLS[$index]}@${ECR_DIGEST}" 1>&2 ||
+    die "vulnerability scan failed for ${COMPONENT}@${ECR_DIGEST}"
 
   DIGESTS+=("${ECR_DIGEST}")
-  log "resolved ${COMPONENT} digest ${ECR_DIGEST}"
+  log "verified ${COMPONENT} digest ${ECR_DIGEST}"
 done
 
-log "all seven images were pushed; writing reviewed HCL input to stdout"
+log "all seven image digests were resolved; writing reviewed HCL input to stdout"
 printf 'image_digests = {\n'
 for index in "${!COMPONENTS[@]}"; do
   printf '  %-9s = "%s"\n' "${COMPONENTS[$index]}" "${DIGESTS[$index]}"

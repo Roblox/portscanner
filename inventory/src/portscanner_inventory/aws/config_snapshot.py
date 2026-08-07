@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from portscanner_inventory.aws.normalize import (
@@ -19,7 +20,7 @@ from portscanner_inventory.base import (
     aws_error_code,
 )
 
-PUBLIC_ENI_QUERY = """
+NETWORK_INTERFACE_QUERY = """
 SELECT
   accountId,
   awsRegion,
@@ -29,7 +30,6 @@ SELECT
   configuration
 WHERE
   resourceType = 'AWS::EC2::NetworkInterface'
-  AND configuration.association.publicIp > '0.0.0.0'
 """.strip()
 
 SECURITY_GROUP_QUERY = """
@@ -53,6 +53,12 @@ class _Fetch:
     failure_code: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _SecurityGroupObservation:
+    permissions: tuple[Mapping[str, Any], ...]
+    captured_at: datetime
+
+
 def _scope_filter(query: str, scope: SnapshotScope) -> str:
     filters: list[str] = []
     if scope.account_id:
@@ -62,6 +68,19 @@ def _scope_filter(query: str, scope: SnapshotScope) -> str:
     if not filters:
         return query
     return f"{query}\n  AND " + "\n  AND ".join(filters)
+
+
+def _capture_time(record: Mapping[str, Any]) -> datetime:
+    value = record.get("configurationItemCaptureTime")
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    else:
+        raise ValueError("Config record has no capture time")
+    if parsed.tzinfo is None:
+        raise ValueError("Config capture time must be timezone aware")
+    return parsed.astimezone(UTC)
 
 
 class ConfigSnapshotBackend:
@@ -126,14 +145,14 @@ class ConfigSnapshotBackend:
 
     def collect(self) -> SnapshotBatch:
         group_fetch = self.fetch_records(SECURITY_GROUP_QUERY)
-        eni_fetch = self.fetch_records(PUBLIC_ENI_QUERY)
+        eni_fetch = self.fetch_records(NETWORK_INTERFACE_QUERY)
         pages = group_fetch.pages + eni_fetch.pages
         malformed = group_fetch.malformed + eni_fetch.malformed
         failure_code = group_fetch.failure_code or eni_fetch.failure_code
 
         security_groups: dict[
             tuple[str, str, str],
-            tuple[Mapping[str, Any], ...],
+            _SecurityGroupObservation,
         ] = {}
         for record in group_fetch.records:
             try:
@@ -142,7 +161,10 @@ class ConfigSnapshotBackend:
                 group_id, permissions = extract_security_group(record)
                 if not self._scope.includes(account_id, region):
                     raise ValueError("record outside requested scope")
-                security_groups[(account_id, region, group_id)] = permissions
+                security_groups[(account_id, region, group_id)] = _SecurityGroupObservation(
+                    permissions=permissions,
+                    captured_at=_capture_time(record),
+                )
             except (KeyError, TypeError, ValueError):
                 malformed += 1
 
@@ -171,18 +193,45 @@ class ConfigSnapshotBackend:
                     for group in raw_groups
                     if isinstance(group, Mapping)
                 }
-                attached = {
+                attached_observations = {
                     group_id: security_groups[(account_id, region, group_id)]
                     for group_id in group_ids
+                    if (account_id, region, group_id) in security_groups
                 }
+                attached = {
+                    group_id: observation.permissions
+                    for group_id, observation in attached_observations.items()
+                }
+                eni_captured_at = _capture_time(record)
+                group_captures = tuple(
+                    sorted(
+                        (
+                            group_id,
+                            observation.captured_at,
+                        )
+                        for group_id, observation in attached_observations.items()
+                    )
+                )
+                composite_observed_at = max(
+                    (eni_captured_at, *(captured_at for _, captured_at in group_captures))
+                )
                 for target in normalize_network_interface(
                     record,
                     account_id=account_id,
                     region=region,
                     security_groups=attached,
                     allowed_tag_keys=self._allowed_tag_keys,
+                    observed_at=composite_observed_at,
+                    eni_observed_at=eni_captured_at,
+                    security_group_observed_at=group_captures,
                 ):
-                    normalized[target.target_id] = target
+                    existing = normalized.get(target.target_id)
+                    if existing is None or (
+                        target.observed_at is not None
+                        and existing.observed_at is not None
+                        and target.observed_at > existing.observed_at
+                    ):
+                        normalized[target.target_id] = target
             except (KeyError, TypeError, ValueError, json.JSONDecodeError):
                 malformed += 1
 

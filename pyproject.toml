@@ -12,6 +12,10 @@ dependencies = []
 Repository = "https://github.com/Roblox/portscanner"
 
 [dependency-groups]
+build = [
+    "hatchling==1.27.0",
+    "setuptools==80.9.0",
+]
 dev = [
     "jsonschema[format]>=4.23,<5",
     "mypy>=1.15,<2",
