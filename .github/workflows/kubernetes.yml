@@ -33,16 +33,18 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
 
-      - name: Install manifest tools
-        uses: yokawasa/action-setup-kube-tools@v0.13.5
+      - uses: actions/setup-go@v7.0.0
         with:
-          setup-tools: |
-            kustomize
-            helm
-            kubeconform
-          kustomize: "5.8.1"
-          helm: "3.20.1"
-          kubeconform: "0.8.0"
+          go-version: "1.26.x"
+          cache: false
+
+      - name: Install manifest tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          go install sigs.k8s.io/kustomize/kustomize/v5@v5.8.1
+          go install helm.sh/helm/v3/cmd/helm@v3.20.1
+          go install github.com/yannh/kubeconform/cmd/kubeconform@v0.8.0
 
       - name: Build and validate Kustomize roots
         shell: bash

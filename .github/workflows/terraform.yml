@@ -86,9 +86,13 @@ jobs:
     steps:
       - uses: actions/checkout@v7.0.1
 
-      - uses: terraform-linters/setup-tflint@v6.3.0
+      - uses: actions/setup-go@v7.0.0
         with:
-          tflint_version: v0.64.0
+          go-version: "1.26.x"
+          cache: false
+
+      - name: Install TFLint
+        run: go install github.com/terraform-linters/tflint@v0.64.0
 
       - name: Lint every Terraform directory
         shell: bash
