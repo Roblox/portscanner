@@ -1,0 +1,66 @@
+# SPDX-FileCopyrightText: 2026 Portscanner contributors
+# SPDX-License-Identifier: MIT
+
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      python-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: gomod
+    directory: /operator
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      go-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: terraform
+    directory: /terraform/aws
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      terraform-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: docker
+    directories:
+      - /db/migrator
+      - /generator
+      - /inventory
+      - /operator
+      - /parser
+      - /processor
+      - /scanner/nmap
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      containers-minor-patch:
+        update-types:
+          - minor
+          - patch

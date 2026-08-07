@@ -1,0 +1,17 @@
+# Copyright 2026 Roblox Corporation
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: portscanner-operator-leader-election
+  labels:
+    app.kubernetes.io/name: portscanner
+    app.kubernetes.io/component: operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: portscanner-operator-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: portscanner-operator

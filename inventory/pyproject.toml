@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "portscanner-inventory"
+version = "0.1.0"
+description = "AWS public-IPv4 inventory and change discovery"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+dependencies = [
+  "boto3>=1.35",
+  "portscanner-contracts>=0.1.0",
+]
+
+[project.optional-dependencies]
+test = [
+  "pytest>=8.3",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/portscanner_inventory"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]

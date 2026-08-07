@@ -1,0 +1,108 @@
+{
+  "schema_version": "1.0",
+  "event_id": "e75d11b596b622ee8f3c3b9286b9e16c6777f76c49826266e3b26a237ddca58f",
+  "event_type": "policy.changed",
+  "target": {
+    "target_id": "d85c41bee53f4d1b42c365ccfdb73aa611974df08171aa3727b296e3bcab737a",
+    "provider": "aws",
+    "scope_id": "123456789012",
+    "location": "us-west-2",
+    "resource_id": "eni-0123456789abcdef0",
+    "private_address": "10.24.8.17",
+    "public_address": "192.0.2.44",
+    "address_family": "ipv4",
+    "transport": "tcp",
+    "generation": 3
+  },
+  "source": {
+    "observation_id": "45ae14ba4a50f05ccdaabfe4647c5e83423c942521597c93791e0f46e6a19928",
+    "source_event_name": "AwsConfigSnapshot",
+    "source_event_id": "synthetic-event-0001",
+    "source_request_id": "synthetic-request-0001",
+    "event_time": "2026-01-15T10:00:00Z",
+    "observed_at": "2026-01-15T10:00:05Z",
+    "collected_at": "2026-01-15T10:00:12Z"
+  },
+  "policy_change": {
+    "policy_change_id": "1de4a6887459943999f6767ae448e65905f7f2d4f5390540d3cbd65c32e35fdf",
+    "target_id": "d85c41bee53f4d1b42c365ccfdb73aa611974df08171aa3727b296e3bcab737a",
+    "previous_fingerprint": "cc3695547e70a1ecfc8ef9bd629cb20345fcba74177014e1f7b27e9a664e71b3",
+    "current_fingerprint": "af099ce21f0ca8554c005fb1cde27110ee37ee5a699e0cbc6fd507d1ef4a75c6",
+    "changed_at": "2026-01-15T10:00:00Z",
+    "candidate_tcp_port_ranges": [
+      {
+        "start": 22,
+        "end": 22
+      },
+      {
+        "start": 443,
+        "end": 443
+      },
+      {
+        "start": 8443,
+        "end": 8443
+      }
+    ]
+  },
+  "scan": {
+    "directive_id": "cec6ecb999881a0895d8d623a8a08198afa1c129d1bf697458ad16e0ff582326",
+    "target_id": "d85c41bee53f4d1b42c365ccfdb73aa611974df08171aa3727b296e3bcab737a",
+    "target_generation": 3,
+    "reason": "policy_change",
+    "profile": "targeted-tcp",
+    "priority": 900,
+    "requested_at": "2026-01-15T10:01:00Z",
+    "deadline_at": "2026-01-15T10:15:00Z",
+    "not_after": "2026-01-15T10:30:00Z",
+    "tcp_port_ranges": [
+      {
+        "start": 22,
+        "end": 22
+      },
+      {
+        "start": 443,
+        "end": 443
+      },
+      {
+        "start": 8443,
+        "end": 8443
+      }
+    ]
+  },
+  "aws_context": {
+    "account_id": "123456789012",
+    "region": "us-west-2",
+    "network_interface_id": "eni-0123456789abcdef0",
+    "private_ip": "10.24.8.17",
+    "public_ip": "192.0.2.44",
+    "instance_id": "i-0123456789abcdef0",
+    "security_group_ids": [
+      "sg-0123456789abcdef0",
+      "sg-0fedcba9876543210"
+    ],
+    "policy_fingerprint": "af099ce21f0ca8554c005fb1cde27110ee37ee5a699e0cbc6fd507d1ef4a75c6",
+    "candidate_tcp_port_ranges": [
+      {
+        "start": 22,
+        "end": 22
+      },
+      {
+        "start": 443,
+        "end": 443
+      },
+      {
+        "start": 8443,
+        "end": 8443
+      }
+    ],
+    "source_event_name": "AwsConfigSnapshot",
+    "source_event_id": "synthetic-event-0001",
+    "source_request_id": "synthetic-request-0001",
+    "tags": {
+      "application": "example-web",
+      "environment": "test",
+      "name": "synthetic-target",
+      "service": "example-api"
+    }
+  }
+}

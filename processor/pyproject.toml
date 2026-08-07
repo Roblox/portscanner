@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "portscanner-processor"
+version = "0.1.0"
+description = "Scheduled ACT finding reconciliation and export"
+requires-python = ">=3.12"
+dependencies = [
+    "portscanner-parser",
+    "boto3",
+    "psycopg[binary]",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[tool.uv.sources]
+portscanner-parser = { workspace = true }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --import-mode=importlib"
+markers = [
+    "integration: requires TEST_DATABASE_URL",
+]

@@ -1,0 +1,14 @@
+# Copyright 2026 Roblox Corporation
+# SPDX-License-Identifier: Apache-2.0
+
+# Scanner Jobs do not require Kubernetes API permissions. This empty Role makes
+# the least-privilege boundary explicit and can be patched by an installation
+# that provides a scanner implementation with additional documented needs.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: portscanner-scanner
+  labels:
+    app.kubernetes.io/name: portscanner
+    app.kubernetes.io/component: scanner
+rules: []

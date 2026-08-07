@@ -1,0 +1,27 @@
+{{/*
+Copyright 2026 Roblox Corporation
+SPDX-License-Identifier: Apache-2.0
+*/}}
+{{- if .Values.priorityClasses.create }}
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: {{ required "priorityClasses.normal.name is required" .Values.priorityClasses.normal.name }}
+  labels:
+    {{- include "portscanner.labels" . | nindent 4 }}
+value: {{ .Values.priorityClasses.normal.value }}
+globalDefault: false
+preemptionPolicy: {{ .Values.priorityClasses.normal.preemptionPolicy }}
+description: Normal-priority one-shot port scanner Jobs.
+---
+apiVersion: scheduling.k8s.io/v1
+kind: PriorityClass
+metadata:
+  name: {{ required "priorityClasses.high.name is required" .Values.priorityClasses.high.name }}
+  labels:
+    {{- include "portscanner.labels" . | nindent 4 }}
+value: {{ .Values.priorityClasses.high.value }}
+globalDefault: false
+preemptionPolicy: {{ .Values.priorityClasses.high.preemptionPolicy }}
+description: High-priority one-shot port scanner Jobs.
+{{- end }}

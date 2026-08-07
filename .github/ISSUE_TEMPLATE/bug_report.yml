@@ -1,0 +1,82 @@
+# SPDX-FileCopyrightText: 2026 Portscanner contributors
+# SPDX-License-Identifier: MIT
+
+name: Bug report
+description: Report a reproducible non-security defect
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not report vulnerabilities or include live inventory, addresses, account
+        identifiers, scanner evidence, credentials, personal data, or internal details.
+        Use SECURITY.md for private vulnerability reporting.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Preflight
+      options:
+        - label: I searched existing issues.
+          required: true
+        - label: This is not a security vulnerability.
+          required: true
+        - label: The reproduction uses only synthetic identifiers and RFC documentation addresses.
+          required: true
+
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: Describe observed and expected behavior.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal synthetic reproduction
+      description: Include bounded steps or code with no live data.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: release tag or abbreviated commit
+    validations:
+      required: true
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Inventory snapshot
+        - Change signal
+        - Scheduling or ownership
+        - Scanner orchestration
+        - Evidence parsing
+        - Exposure or finding state
+        - Terraform or deployment
+        - Documentation or tooling
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: failure-semantics
+    attributes:
+      label: Safety and UNKNOWN impact
+      description: State whether scope, ownership, rates, idempotency, or UNKNOWN behavior changed.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized diagnostics
+      description: Paste only minimal redacted output. Do not attach raw scanner or provider payloads.

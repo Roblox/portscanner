@@ -1,0 +1,7 @@
+# Copyright 2026 Roblox Corporation
+# SPDX-License-Identifier: Apache-2.0
+
+.git
+bin
+cover.out
+*.log

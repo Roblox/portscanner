@@ -1,0 +1,35 @@
+{{/*
+Copyright 2026 Roblox Corporation
+SPDX-License-Identifier: Apache-2.0
+*/}}
+{{- if .Values.generator.rbac.create }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "portscanner.fullname" . }}-generator
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "portscanner.labels" . | nindent 4 }}
+    app.kubernetes.io/component: generator
+rules:
+  - apiGroups: [scanning.portscanner.io]
+    resources: [scanners]
+    verbs: [get, list, watch, create, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "portscanner.fullname" . }}-generator
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "portscanner.labels" . | nindent 4 }}
+    app.kubernetes.io/component: generator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "portscanner.fullname" . }}-generator
+subjects:
+  - kind: Group
+    apiGroup: rbac.authorization.k8s.io
+    name: {{ required "generator.rbac.group is required" .Values.generator.rbac.group | quote }}
+{{- end }}

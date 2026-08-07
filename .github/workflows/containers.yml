@@ -1,0 +1,134 @@
+# SPDX-FileCopyrightText: 2026 Portscanner contributors
+# SPDX-License-Identifier: MIT
+
+name: Containers
+
+on:
+  pull_request:
+    paths:
+      - "**/Dockerfile"
+      - "**/*.dockerfile"
+      - "contracts/**"
+      - "db/migrator/**"
+      - "generator/**"
+      - "inventory/**"
+      - "operator/**"
+      - "parser/**"
+      - "processor/**"
+      - "scanner/**"
+      - "**/requirements*.txt"
+      - "**/pyproject.toml"
+      - "**/go.mod"
+      - "**/go.sum"
+      - ".github/workflows/containers.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "**/Dockerfile"
+      - "**/*.dockerfile"
+      - "contracts/**"
+      - "db/migrator/**"
+      - "generator/**"
+      - "inventory/**"
+      - "operator/**"
+      - "parser/**"
+      - "processor/**"
+      - "scanner/**"
+      - "**/requirements*.txt"
+      - "**/pyproject.toml"
+      - "**/go.mod"
+      - "**/go.sum"
+      - ".github/workflows/containers.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: containers-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  discover:
+    name: Discover Dockerfiles
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      present: ${{ steps.matrix.outputs.present }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - id: matrix
+        name: Build a safe matrix
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+
+          output = subprocess.check_output(
+              ["git", "ls-files", "Dockerfile", "**/Dockerfile", "**/*.dockerfile"],
+              text=True,
+          )
+          component_contexts = {
+              "operator/Dockerfile": "operator",
+              "scanner/nmap/Dockerfile": ".",
+          }
+          entries = []
+          for index, dockerfile in enumerate(sorted(set(output.splitlines()))):
+              if not re.fullmatch(r"[A-Za-z0-9_./-]+", dockerfile):
+                  raise SystemExit(f"unsafe Dockerfile path: {dockerfile!r}")
+              context = component_contexts.get(dockerfile, ".")
+              entries.append(
+                  {
+                      "dockerfile": dockerfile,
+                      "context": context,
+                      "image": f"portscanner-ci:component-{index}",
+                  }
+              )
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(
+                  "matrix="
+                  + json.dumps({"include": entries}, separators=(",", ":"))
+                  + "\n"
+              )
+              handle.write(f"present={'true' if entries else 'false'}\n")
+          PY
+
+  build-and-scan:
+    name: Build and scan ${{ matrix.dockerfile }}
+    needs:
+      - discover
+    if: needs.discover.outputs.present == 'true'
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Build image
+        env:
+          BUILD_CONTEXT: ${{ matrix.context }}
+          DOCKERFILE: ${{ matrix.dockerfile }}
+          IMAGE: ${{ matrix.image }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build \
+            --pull \
+            --file "${DOCKERFILE}" \
+            --tag "${IMAGE}" \
+            "${BUILD_CONTEXT}"
+
+      - name: Scan image with Trivy
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: ${{ matrix.image }}
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: CRITICAL,HIGH

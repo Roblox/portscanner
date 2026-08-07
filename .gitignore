@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: 2026 Roblox
+# SPDX-License-Identifier: MIT
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.python-version.local
+.venv/
+venv/
+build/
+dist/
+
+# Test and analysis output
+.coverage
+.coverage.*
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+coverage.xml
+htmlcov/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.local
+
+# Terraform state, plans, local variables, and provider caches
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+*.auto.tfvars
+*.tfplan
+*.plan
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+*.swp

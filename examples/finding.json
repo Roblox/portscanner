@@ -1,0 +1,45 @@
+{
+  "schema_version": "1.0",
+  "kind": "finding_event",
+  "finding": {
+    "fingerprint": "2525bd5b267cb8c4b1c3b6e88e029c62f902de39a2e38589373761f3f2a7fecb",
+    "target_id": "d85c41bee53f4d1b42c365ccfdb73aa611974df08171aa3727b296e3bcab737a",
+    "provider": "aws",
+    "generation": 3,
+    "protocol": "tcp",
+    "port": 443,
+    "rule_key": "public-tls-service",
+    "status": "open",
+    "severity": "high",
+    "title": "Public TLS service",
+    "description": "A synthetic public TLS service is reachable.",
+    "observed_address": "192.0.2.44",
+    "service": {
+      "name": "https",
+      "product": "synthetic-service",
+      "version": "1.0",
+      "certificate_sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "ssh_host_key_sha256": null,
+      "banner_sha256": null,
+      "identity_sha256": "650bd221413a0d861072a22f07f56d316d81c37c0f62d7b5b8837e725f75d94e"
+    },
+    "first_opened_at": "2026-01-15T10:02:18Z",
+    "last_seen_at": "2026-01-15T10:02:18Z",
+    "last_changed_at": "2026-01-15T10:02:18Z",
+    "resolved_at": null,
+    "resolution_reason": null,
+    "version": 1
+  },
+  "event": {
+    "event_key": "769ac48c7d22f029c07766bbe3526544f6ca2bd1ba8488b6d2534f0613da2b2e",
+    "event_type": "opened",
+    "previous_status": null,
+    "new_status": "open",
+    "reason": "exposure_open",
+    "occurred_at": "2026-01-15T10:02:18Z",
+    "source": {
+      "kind": "scan_attempt",
+      "key": "example-attempt-0001"
+    }
+  }
+}

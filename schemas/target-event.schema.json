@@ -1,0 +1,639 @@
+{
+  "$defs": {
+    "AddressFamily": {
+      "description": "Network address family.",
+      "enum": [
+        "ipv4"
+      ],
+      "title": "AddressFamily",
+      "type": "string"
+    },
+    "AwsContext": {
+      "additionalProperties": false,
+      "description": "Closed, bounded AWS evidence needed to explain a scan decision.",
+      "properties": {
+        "account_id": {
+          "pattern": "^[0-9]{12}$",
+          "title": "Account Id",
+          "type": "string"
+        },
+        "candidate_tcp_port_ranges": {
+          "items": {
+            "$ref": "#/$defs/TcpPortRange"
+          },
+          "maxItems": 256,
+          "title": "Candidate Tcp Port Ranges",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "instance_id": {
+          "anyOf": [
+            {
+              "pattern": "^i-[0-9a-f]{8,32}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Instance Id"
+        },
+        "network_interface_id": {
+          "pattern": "^eni-[0-9a-f]{8,32}$",
+          "title": "Network Interface Id",
+          "type": "string"
+        },
+        "policy_fingerprint": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Policy Fingerprint",
+          "type": "string"
+        },
+        "private_ip": {
+          "format": "ipv4",
+          "maxLength": 15,
+          "minLength": 7,
+          "title": "Private Ip",
+          "type": "string"
+        },
+        "public_ip": {
+          "description": "Public IPv4; RFC 5737 ranges are accepted for examples.",
+          "format": "ipv4",
+          "maxLength": 15,
+          "minLength": 7,
+          "title": "Public Ip",
+          "type": "string"
+        },
+        "region": {
+          "maxLength": 32,
+          "minLength": 9,
+          "pattern": "^[a-z]{2}(?:-[a-z0-9]+)+-[0-9]+$",
+          "title": "Region",
+          "type": "string"
+        },
+        "security_group_ids": {
+          "items": {
+            "pattern": "^sg-[0-9a-f]{8,32}$",
+            "type": "string"
+          },
+          "maxItems": 64,
+          "title": "Security Group Ids",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "source_event_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Source Event Id",
+          "type": "string"
+        },
+        "source_event_name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_.:/-]+$",
+          "title": "Source Event Name",
+          "type": "string"
+        },
+        "source_request_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Source Request Id",
+          "type": "string"
+        },
+        "tags": {
+          "$ref": "#/$defs/AwsTags"
+        }
+      },
+      "required": [
+        "account_id",
+        "region",
+        "network_interface_id",
+        "private_ip",
+        "public_ip",
+        "security_group_ids",
+        "policy_fingerprint",
+        "candidate_tcp_port_ranges",
+        "source_event_name",
+        "source_event_id",
+        "source_request_id",
+        "tags"
+      ],
+      "title": "AwsContext",
+      "type": "object"
+    },
+    "AwsTags": {
+      "additionalProperties": false,
+      "description": "Closed set of low-risk AWS tags permitted in shared events.",
+      "properties": {
+        "application": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Application"
+        },
+        "environment": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Environment"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Name"
+        },
+        "service": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Service"
+        }
+      },
+      "title": "AwsTags",
+      "type": "object"
+    },
+    "CloudProvider": {
+      "description": "Cloud provider represented by a target.",
+      "enum": [
+        "aws"
+      ],
+      "title": "CloudProvider",
+      "type": "string"
+    },
+    "PolicyChange": {
+      "additionalProperties": false,
+      "description": "Relevant policy transition for one stable target identity.",
+      "properties": {
+        "candidate_tcp_port_ranges": {
+          "items": {
+            "$ref": "#/$defs/TcpPortRange"
+          },
+          "maxItems": 256,
+          "title": "Candidate Tcp Port Ranges",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "changed_at": {
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,6})?Z$",
+          "title": "Changed At",
+          "type": "string"
+        },
+        "current_fingerprint": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Current Fingerprint",
+          "type": "string"
+        },
+        "policy_change_id": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Policy Change Id",
+          "type": "string"
+        },
+        "previous_fingerprint": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Previous Fingerprint"
+        },
+        "target_id": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Target Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "policy_change_id",
+        "target_id",
+        "current_fingerprint",
+        "changed_at",
+        "candidate_tcp_port_ranges"
+      ],
+      "title": "PolicyChange",
+      "type": "object"
+    },
+    "ScanDirective": {
+      "additionalProperties": false,
+      "description": "Bounded request to scan a specific target generation.",
+      "properties": {
+        "deadline_at": {
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,6})?Z$",
+          "title": "Deadline At",
+          "type": "string"
+        },
+        "directive_id": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Directive Id",
+          "type": "string"
+        },
+        "not_after": {
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,6})?Z$",
+          "title": "Not After",
+          "type": "string"
+        },
+        "priority": {
+          "maximum": 1000,
+          "minimum": 0,
+          "title": "Priority",
+          "type": "integer"
+        },
+        "profile": {
+          "$ref": "#/$defs/ScanProfile"
+        },
+        "reason": {
+          "$ref": "#/$defs/ScanReason"
+        },
+        "requested_at": {
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,6})?Z$",
+          "title": "Requested At",
+          "type": "string"
+        },
+        "target_generation": {
+          "minimum": 1,
+          "title": "Target Generation",
+          "type": "integer"
+        },
+        "target_id": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Target Id",
+          "type": "string"
+        },
+        "tcp_port_ranges": {
+          "items": {
+            "$ref": "#/$defs/TcpPortRange"
+          },
+          "maxItems": 256,
+          "minItems": 1,
+          "title": "Tcp Port Ranges",
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "directive_id",
+        "target_id",
+        "target_generation",
+        "reason",
+        "profile",
+        "priority",
+        "requested_at",
+        "deadline_at",
+        "not_after",
+        "tcp_port_ranges"
+      ],
+      "title": "ScanDirective",
+      "type": "object"
+    },
+    "ScanProfile": {
+      "description": "Scanner behavior requested by a directive.",
+      "enum": [
+        "fast-full-tcp",
+        "targeted-tcp",
+        "deep"
+      ],
+      "title": "ScanProfile",
+      "type": "string"
+    },
+    "ScanReason": {
+      "description": "Reason a scan entered the work queue.",
+      "enum": [
+        "new_target",
+        "target_change",
+        "policy_change",
+        "coverage",
+        "manual"
+      ],
+      "title": "ScanReason",
+      "type": "string"
+    },
+    "SourceObservation": {
+      "additionalProperties": false,
+      "description": "Timestamps and source identifiers for one inventory observation.",
+      "properties": {
+        "collected_at": {
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,6})?Z$",
+          "title": "Collected At",
+          "type": "string"
+        },
+        "event_time": {
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,6})?Z$",
+          "title": "Event Time",
+          "type": "string"
+        },
+        "observation_id": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Observation Id",
+          "type": "string"
+        },
+        "observed_at": {
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,6})?Z$",
+          "title": "Observed At",
+          "type": "string"
+        },
+        "source_event_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Source Event Id",
+          "type": "string"
+        },
+        "source_event_name": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_.:/-]+$",
+          "title": "Source Event Name",
+          "type": "string"
+        },
+        "source_request_id": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Source Request Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "observation_id",
+        "source_event_name",
+        "source_event_id",
+        "source_request_id",
+        "event_time",
+        "observed_at",
+        "collected_at"
+      ],
+      "title": "SourceObservation",
+      "type": "object"
+    },
+    "Target": {
+      "additionalProperties": false,
+      "description": "Stable resource/private-address identity plus mutable public state.",
+      "properties": {
+        "address_family": {
+          "$ref": "#/$defs/AddressFamily"
+        },
+        "generation": {
+          "minimum": 1,
+          "title": "Generation",
+          "type": "integer"
+        },
+        "location": {
+          "maxLength": 32,
+          "minLength": 9,
+          "pattern": "^[a-z]{2}(?:-[a-z0-9]+)+-[0-9]+$",
+          "title": "Location",
+          "type": "string"
+        },
+        "private_address": {
+          "format": "ipv4",
+          "maxLength": 15,
+          "minLength": 7,
+          "title": "Private Address",
+          "type": "string"
+        },
+        "provider": {
+          "$ref": "#/$defs/CloudProvider"
+        },
+        "public_address": {
+          "description": "Public IPv4; RFC 5737 ranges are accepted for examples.",
+          "format": "ipv4",
+          "maxLength": 15,
+          "minLength": 7,
+          "title": "Public Address",
+          "type": "string"
+        },
+        "resource_id": {
+          "pattern": "^eni-[0-9a-f]{8,32}$",
+          "title": "Resource Id",
+          "type": "string"
+        },
+        "scope_id": {
+          "pattern": "^[0-9]{12}$",
+          "title": "Scope Id",
+          "type": "string"
+        },
+        "target_id": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Target Id",
+          "type": "string"
+        },
+        "transport": {
+          "$ref": "#/$defs/TransportProtocol"
+        }
+      },
+      "required": [
+        "target_id",
+        "provider",
+        "scope_id",
+        "location",
+        "resource_id",
+        "private_address",
+        "public_address",
+        "address_family",
+        "transport",
+        "generation"
+      ],
+      "title": "Target",
+      "type": "object"
+    },
+    "TargetEvent": {
+      "additionalProperties": false,
+      "description": "Inventory event and its complete, bounded scan decision context.",
+      "properties": {
+        "aws_context": {
+          "$ref": "#/$defs/AwsContext"
+        },
+        "event_id": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Event Id",
+          "type": "string"
+        },
+        "event_type": {
+          "enum": [
+            "target.upsert",
+            "policy.changed",
+            "rescan.requested"
+          ],
+          "title": "Event Type",
+          "type": "string"
+        },
+        "policy_change": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PolicyChange"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "scan": {
+          "$ref": "#/$defs/ScanDirective"
+        },
+        "schema_version": {
+          "const": "1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/SourceObservation"
+        },
+        "target": {
+          "$ref": "#/$defs/Target"
+        }
+      },
+      "required": [
+        "schema_version",
+        "event_id",
+        "event_type",
+        "target",
+        "source",
+        "scan",
+        "aws_context"
+      ],
+      "title": "TargetEvent",
+      "type": "object"
+    },
+    "TargetRemoval": {
+      "additionalProperties": false,
+      "description": "Immutable target tombstone used for downstream cancellation and projection.",
+      "properties": {
+        "aws_context": {
+          "$ref": "#/$defs/AwsContext"
+        },
+        "event_id": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Event Id",
+          "type": "string"
+        },
+        "event_type": {
+          "const": "target.removed",
+          "title": "Event Type",
+          "type": "string"
+        },
+        "removed_at": {
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,6})?Z$",
+          "title": "Removed At",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "source": {
+          "$ref": "#/$defs/SourceObservation"
+        },
+        "target": {
+          "$ref": "#/$defs/Target"
+        }
+      },
+      "required": [
+        "schema_version",
+        "event_id",
+        "event_type",
+        "target",
+        "source",
+        "aws_context",
+        "removed_at"
+      ],
+      "title": "TargetRemoval",
+      "type": "object"
+    },
+    "TcpPortRange": {
+      "additionalProperties": false,
+      "description": "Inclusive TCP port range.",
+      "properties": {
+        "end": {
+          "maximum": 65535,
+          "minimum": 1,
+          "title": "End",
+          "type": "integer"
+        },
+        "start": {
+          "maximum": 65535,
+          "minimum": 1,
+          "title": "Start",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "start",
+        "end"
+      ],
+      "title": "TcpPortRange",
+      "type": "object"
+    },
+    "TransportProtocol": {
+      "description": "Transport protocol scanned by the current runtime.",
+      "enum": [
+        "tcp"
+      ],
+      "title": "TransportProtocol",
+      "type": "string"
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/Roblox/portscanner/main/schemas/target-event.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "discriminator": {
+    "mapping": {
+      "policy.changed": "#/$defs/TargetEvent",
+      "rescan.requested": "#/$defs/TargetEvent",
+      "target.removed": "#/$defs/TargetRemoval",
+      "target.upsert": "#/$defs/TargetEvent"
+    },
+    "propertyName": "event_type"
+  },
+  "oneOf": [
+    {
+      "$ref": "#/$defs/TargetEvent"
+    },
+    {
+      "$ref": "#/$defs/TargetRemoval"
+    }
+  ]
+}

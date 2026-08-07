@@ -1,0 +1,38 @@
+# Copyright 2026 Roblox Corporation
+# SPDX-License-Identifier: Apache-2.0
+
+# 192.0.2.0/24 is reserved by RFC 5737 for documentation and is not a real
+# Internet scan target.
+apiVersion: scanning.portscanner.io/v1alpha1
+kind: Scanner
+metadata:
+  name: documentation-target
+spec:
+  target:
+    address: 192.0.2.25
+    targetId: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    provider: aws
+    scopeId: "123456789012"
+    location: us-east-1
+    resourceId: eni-0123456789abcdef0
+    privateAddress: 10.0.0.25
+    generation: 1
+  eventId: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  directiveId: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+  traceId: example-trace
+  reason: manual
+  profile: targeted-tcp
+  ports:
+    - 80
+    - 443
+  ranges:
+    - start: 8000
+      end: 8010
+  priority: 100
+  deadline: "2099-01-01T00:10:00Z"
+  notAfter: "2099-01-01T00:15:00Z"
+  sourceTimestamps:
+    eventAt: "2026-08-05T00:00:00Z"
+    observedAt: "2026-08-05T00:00:01Z"
+  retryLimit: 0
+  ttlSecondsAfterFinished: 3600

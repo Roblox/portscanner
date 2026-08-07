@@ -1,0 +1,41 @@
+# SPDX-FileCopyrightText: 2026 Portscanner contributors
+# SPDX-License-Identifier: MIT
+
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "portscanner-scanner"
+version = "0.1.0"
+description = "Single-target hardened Nmap VERIFY worker"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+dependencies = [
+  "boto3>=1.36",
+  "defusedxml>=0.7.1",
+  "portscanner-contracts",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8.3"]
+
+[project.scripts]
+portscanner-verify = "portscanner_scanner.cli:entrypoint"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/portscanner_scanner"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+extend = "../../pyproject.toml"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["ANN", "ARG", "PLR2004", "S101"]
+"tests/conftest.py" = ["PLC0415"]
+"tests/test_targets.py" = ["S104"]

@@ -1,0 +1,78 @@
+# SPDX-FileCopyrightText: 2026 Portscanner contributors
+# SPDX-License-Identifier: MIT
+
+name: Feature request
+description: Propose a scoped improvement or source adapter
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the problem and safety boundary, not a live environment. New source
+        proposals should follow docs/adding-sources.md.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Preflight
+      options:
+        - label: I searched existing issues and documentation.
+          required: true
+        - label: The proposal does not require scanning a third party.
+          required: true
+        - label: All examples are synthetic and use RFC documentation addresses.
+          required: true
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What operator problem should be solved?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Include contracts and failure behavior, not live configuration.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: lifecycle
+    attributes:
+      label: Lifecycle stage
+      multiple: true
+      options:
+        - DISCOVER
+        - PRIORITIZE
+        - VERIFY
+        - ACT
+        - Deployment or tooling
+    validations:
+      required: true
+
+  - type: textarea
+    id: safety
+    attributes:
+      label: Safety and data model
+      description: Explain authorization, ownership, rates, UNKNOWN, metadata, and retention impact.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Include snapshot-only operation and simpler configuration where relevant.
+
+  - type: textarea
+    id: tests
+    attributes:
+      label: Verification plan
+      description: List contract, unit, integration, failure, idempotency, and cleanup tests.
+    validations:
+      required: true

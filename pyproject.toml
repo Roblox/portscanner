@@ -1,0 +1,133 @@
+# SPDX-FileCopyrightText: 2026 Roblox
+# SPDX-License-Identifier: MIT
+
+[project]
+name = "portscanner-workspace"
+version = "0.1.0"
+description = "Public monorepo tooling for the Portscanner project"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/Roblox/portscanner"
+
+[dependency-groups]
+dev = [
+    "jsonschema[format]>=4.23,<5",
+    "mypy>=1.15,<2",
+    "pytest>=8.3,<9",
+    "reuse>=5,<6",
+    "ruff>=0.11,<1",
+    "types-jsonschema>=4.23,<5",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = [
+    "contracts",
+    "db/migrator",
+    "generator*",
+    "inventory*",
+    "parser*",
+    "processor*",
+    "packages/*",
+    "scanner/nmap",
+    "services/*",
+]
+
+[tool.uv.sources]
+portscanner-contracts = { workspace = true }
+portscanner-inventory = { workspace = true }
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["contracts/src", "contracts/tests", "examples", "schemas"]
+
+[tool.ruff.format]
+docstring-code-format = true
+
+[tool.ruff.lint]
+select = [
+    "A",
+    "ANN",
+    "ARG",
+    "B",
+    "C4",
+    "DTZ",
+    "E",
+    "F",
+    "I",
+    "N",
+    "PERF",
+    "PIE",
+    "PL",
+    "PT",
+    "PTH",
+    "RUF",
+    "S",
+    "SIM",
+    "T20",
+    "UP",
+    "W",
+]
+ignore = [
+    "ANN401",
+    "PLR0913",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = [
+    "ANN",
+    "ARG",
+    "PLC0415",
+    "PLR2004",
+    "PT011",
+    "S101",
+    "S105",
+    "S106",
+    "SLF001",
+]
+"examples/generate.py" = ["T201"]
+"schemas/generate.py" = ["T201"]
+"tools/sanitize.py" = ["PLR0911", "PLR0912", "PLR0917", "S603", "T201"]
+"tools/tests/**" = ["PT009", "S603", "S607"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+files = [
+    "contracts/src",
+    "inventory/src",
+    "generator/src",
+    "scanner/nmap/src",
+    "parser/src",
+    "processor/src",
+    "db/migrator/src",
+]
+show_error_codes = true
+warn_unreachable = true
+
+[[tool.mypy.overrides]]
+module = [
+    "boto3",
+    "boto3.*",
+    "botocore",
+    "botocore.*",
+    "defusedxml",
+    "defusedxml.*",
+    "kubernetes",
+    "kubernetes.*",
+]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+addopts = [
+    "--strict-config",
+    "--strict-markers",
+    "-ra",
+]
+testpaths = ["contracts/tests"]

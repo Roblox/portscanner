@@ -1,0 +1,130 @@
+{
+  "schema_version": "1.0",
+  "event_id": "e75d11b596b622ee8f3c3b9286b9e16c6777f76c49826266e3b26a237ddca58f",
+  "directive_id": "cec6ecb999881a0895d8d623a8a08198afa1c129d1bf697458ad16e0ff582326",
+  "trace_id": "e75d11b596b622ee8f3c3b9286b9e16c6777f76c49826266e3b26a237ddca58f",
+  "run_id": "example-run-0001",
+  "attempt_id": "example-attempt-0001",
+  "target": {
+    "target_id": "d85c41bee53f4d1b42c365ccfdb73aa611974df08171aa3727b296e3bcab737a",
+    "address": "192.0.2.44",
+    "generation": 3
+  },
+  "profile": "targeted-tcp",
+  "image_version": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "coverage": {
+    "protocol": "tcp",
+    "ports": [
+      "22",
+      "443",
+      "8443"
+    ],
+    "complete": true
+  },
+  "timestamps": {
+    "scan_started_at": "2026-01-15T10:02:00Z",
+    "scan_completed_at": "2026-01-15T10:02:18Z",
+    "result_uploaded_at": "2026-01-15T10:02:19Z"
+  },
+  "commands": {
+    "discovery": {
+      "argv": [
+        "nmap",
+        "-p",
+        "22,443,8443",
+        "-oX",
+        "<raw-xml>",
+        "<authorized-target>"
+      ],
+      "timeout_seconds": 300,
+      "exit_code": 0
+    },
+    "enrichment": {
+      "argv": [
+        "nmap",
+        "-sV",
+        "-p",
+        "443,8443",
+        "-oX",
+        "<raw-xml>",
+        "<authorized-target>"
+      ],
+      "timeout_seconds": 300,
+      "exit_code": 0
+    }
+  },
+  "outcome": "complete",
+  "exit_code": 0,
+  "raw_result": {
+    "bucket": "synthetic-results",
+    "key": "verify/results/example/raw/nmap-discovery.xml",
+    "sha256": "539b0cdbc4c060f09d8605f7827fcd65ed66a16dba0a17f647f7c636502f4d27",
+    "format": "nmap-xml",
+    "enrichment": {
+      "bucket": "synthetic-results",
+      "key": "verify/results/example/raw/nmap-enrichment.xml",
+      "sha256": "a43751db3a149f98d96804d65cec8ce6d2c7ee5b614725008f006fb020994ffe"
+    }
+  },
+  "error": null,
+  "scan_result": {
+    "schema_version": "1.0",
+    "result_id": "07b066727e6f14f68a5b02a4cadfb6c69c7a034b87211e490b65f980f0ba5acf",
+    "event_id": "e75d11b596b622ee8f3c3b9286b9e16c6777f76c49826266e3b26a237ddca58f",
+    "directive_id": "cec6ecb999881a0895d8d623a8a08198afa1c129d1bf697458ad16e0ff582326",
+    "target": {
+      "target_id": "d85c41bee53f4d1b42c365ccfdb73aa611974df08171aa3727b296e3bcab737a",
+      "provider": "aws",
+      "scope_id": "123456789012",
+      "location": "us-west-2",
+      "resource_id": "eni-0123456789abcdef0",
+      "private_address": "10.24.8.17",
+      "public_address": "192.0.2.44",
+      "address_family": "ipv4",
+      "transport": "tcp",
+      "generation": 3
+    },
+    "profile": "targeted-tcp",
+    "scanner": "nmap",
+    "scanner_version": "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "started_at": "2026-01-15T10:02:00Z",
+    "completed_at": "2026-01-15T10:02:18Z",
+    "outcome": "complete",
+    "requested_tcp_port_ranges": [
+      {
+        "start": 22,
+        "end": 22
+      },
+      {
+        "start": 443,
+        "end": 443
+      },
+      {
+        "start": 8443,
+        "end": 8443
+      }
+    ],
+    "scanned_tcp_port_ranges": [
+      {
+        "start": 22,
+        "end": 22
+      },
+      {
+        "start": 443,
+        "end": 443
+      },
+      {
+        "start": 8443,
+        "end": 8443
+      }
+    ],
+    "open_tcp_ports": [
+      443,
+      8443
+    ],
+    "exit_code": 0,
+    "raw_result_sha256": "539b0cdbc4c060f09d8605f7827fcd65ed66a16dba0a17f647f7c636502f4d27",
+    "error_code": null,
+    "error_message": null
+  }
+}

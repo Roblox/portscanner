@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "portscanner-migrator"
+version = "0.1.0"
+description = "Transactional PostgreSQL migrator for the ACT data plane"
+requires-python = ">=3.12"
+dependencies = [
+    "boto3",
+    "psycopg[binary]",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.scripts]
+act-migrate = "act_migrator.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --import-mode=importlib"
+markers = [
+    "integration: requires TEST_DATABASE_URL",
+]

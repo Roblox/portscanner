@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: 2026 Roblox
+# SPDX-License-Identifier: MIT
+
+.git
+.github
+.venv
+venv
+**/__pycache__
+**/*.py[cod]
+**/*.egg-info
+**/.mypy_cache
+**/.pytest_cache
+**/.ruff_cache
+**/.terraform
+.coverage*
+htmlcov
+build
+dist
+.env
+.env.*
+*.local
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+*.auto.tfvars
+*.tfplan
+*.plan

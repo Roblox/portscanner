@@ -1,0 +1,171 @@
+# SPDX-FileCopyrightText: 2026 Portscanner contributors
+# SPDX-License-Identifier: MIT
+
+name: Core CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: core-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Python
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          version: "0.11.30"
+
+      - name: Install workspace dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv sync --frozen --all-packages --group dev
+
+      - name: Run workspace Python checks
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        shell: bash
+        run: |
+          set -euo pipefail
+          make format-check
+          make lint
+          make typecheck
+          make test
+
+  go:
+    name: Go
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: operator/go.mod
+          cache-dependency-path: operator/go.sum
+
+      - name: Test each Go module
+        shell: bash
+        run: |
+          set -euo pipefail
+          found=false
+          while IFS= read -r module; do
+            found=true
+            directory="$(dirname "${module}")"
+            (
+              cd "${directory}"
+              go test ./...
+            )
+          done < <(git ls-files 'go.mod' '**/go.mod')
+          if [[ "${found}" == "false" ]]; then
+            echo "No Go modules are present."
+          fi
+
+  schemas:
+    name: JSON schemas
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          version: "0.11.30"
+
+      - name: Install schema dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv sync --frozen --all-packages --group dev
+
+      - name: Validate schema documents
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! -d schemas ]]; then
+            echo "No schemas directory is present."
+            exit 0
+          fi
+          uv run python - <<'PY'
+          import json
+          from pathlib import Path
+
+          from jsonschema.validators import validator_for
+
+          schemas = sorted(Path("schemas").glob("*.schema.json"))
+          if not schemas:
+              raise SystemExit("schemas directory contains no *.schema.json files")
+          for path in schemas:
+              schema = json.loads(path.read_text(encoding="utf-8"))
+              validator_for(schema).check_schema(schema)
+              print(f"validated {path}")
+          PY
+
+      - name: Run schema contract tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f contracts/tests/test_schemas.py ]]; then
+            uv run --package portscanner-contracts \
+              pytest contracts/tests/test_schemas.py
+          fi
+
+  generated-drift:
+    name: Generated drift
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: operator/go.mod
+          cache-dependency-path: operator/go.sum
+
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@v9.0.0
+        with:
+          version: "0.11.30"
+
+      - name: Install generation dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv sync --frozen --all-packages --group dev
+
+      - name: Regenerate supported artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f Makefile ]]; then
+            make check-generated
+          fi
+          if [[ -f operator/Makefile ]]; then
+            make -C operator generate
+            make -C operator manifests
+          else
+            echo "No generated component targets are present."
+          fi
+
+      - name: Require a clean generated diff
+        run: git diff --exit-code

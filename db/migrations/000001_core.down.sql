@@ -1,0 +1,11 @@
+DROP TRIGGER exposure_events_append_only ON act.exposure_events;
+DROP TABLE act.exposure_events;
+DROP TABLE act.exposure_state;
+DROP TABLE act.observations;
+DROP TABLE act.scan_attempt_coverage;
+DROP TABLE act.scan_attempts;
+DROP TRIGGER target_events_append_only ON act.target_events;
+DROP TABLE act.target_events;
+DROP TABLE act.targets;
+DROP FUNCTION act.reject_append_only_mutation();
+DROP SCHEMA act;
