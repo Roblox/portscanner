@@ -1,0 +1,81 @@
+{{/*
+Copyright 2026 Roblox Corporation
+SPDX-License-Identifier: Apache-2.0
+*/}}
+{{- if .Values.operator.rbac.create }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "portscanner.fullname" . }}-operator
+  labels:
+    {{- include "portscanner.labels" . | nindent 4 }}
+    app.kubernetes.io/component: operator
+rules:
+  - apiGroups: [scanning.portscanner.io]
+    resources: [scanners]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [scanning.portscanner.io]
+    resources: [scanners/status]
+    verbs: [get, update, patch]
+  - apiGroups: [scanning.portscanner.io]
+    resources: [scanners/finalizers]
+    verbs: [update]
+  - apiGroups: [batch]
+    resources: [jobs]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [batch]
+    resources: [jobs/status]
+    verbs: [get]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "portscanner.fullname" . }}-operator
+  labels:
+    {{- include "portscanner.labels" . | nindent 4 }}
+    app.kubernetes.io/component: operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "portscanner.fullname" . }}-operator
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "portscanner.operatorServiceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "portscanner.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "portscanner.labels" . | nindent 4 }}
+    app.kubernetes.io/component: operator
+rules:
+  - apiGroups: [coordination.k8s.io]
+    resources: [leases]
+    verbs: [get, list, create, update]
+  - apiGroups: [""]
+    resources: [events]
+    verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "portscanner.fullname" . }}-leader-election
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "portscanner.labels" . | nindent 4 }}
+    app.kubernetes.io/component: operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "portscanner.fullname" . }}-leader-election
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "portscanner.operatorServiceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+{{- end }}

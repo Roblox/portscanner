@@ -1,0 +1,653 @@
+{
+  "$defs": {
+    "CloudProvider": {
+      "description": "Cloud provider represented by a target.",
+      "enum": [
+        "aws"
+      ],
+      "title": "CloudProvider",
+      "type": "string"
+    },
+    "FindingEvent": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "event_type": {
+                "const": "opened"
+              }
+            },
+            "required": [
+              "event_type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "new_status": {
+                "const": "open"
+              },
+              "previous_status": {
+                "const": null
+              },
+              "reason": {
+                "enum": [
+                  "exposure_open",
+                  "exposure_reopened",
+                  "reconciliation_repair"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "event_type": {
+                "const": "reopened"
+              }
+            },
+            "required": [
+              "event_type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "new_status": {
+                "const": "open"
+              },
+              "previous_status": {
+                "const": "resolved"
+              },
+              "reason": {
+                "enum": [
+                  "exposure_reopened",
+                  "reconciliation_repair"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "event_type": {
+                "const": "updated"
+              }
+            },
+            "required": [
+              "event_type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "new_status": {
+                "const": "open"
+              },
+              "previous_status": {
+                "const": "open"
+              },
+              "reason": {
+                "enum": [
+                  "service_changed",
+                  "address_changed",
+                  "rule_changed"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "event_type": {
+                "const": "resolved"
+              }
+            },
+            "required": [
+              "event_type"
+            ]
+          },
+          "then": {
+            "properties": {
+              "new_status": {
+                "const": "resolved"
+              },
+              "previous_status": {
+                "const": "open"
+              },
+              "reason": {
+                "enum": [
+                  "ownership_removed",
+                  "exposure_closed",
+                  "rule_disabled",
+                  "rule_no_longer_matches"
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "description": "One finding lifecycle transition.",
+      "properties": {
+        "event_key": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Event Key",
+          "type": "string"
+        },
+        "event_type": {
+          "$ref": "#/$defs/FindingEventType"
+        },
+        "new_status": {
+          "$ref": "#/$defs/FindingStatus"
+        },
+        "occurred_at": {
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,6})?Z$",
+          "title": "Occurred At",
+          "type": "string"
+        },
+        "previous_status": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FindingStatus"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "$ref": "#/$defs/FindingReason"
+        },
+        "source": {
+          "$ref": "#/$defs/FindingEventSource"
+        }
+      },
+      "required": [
+        "event_key",
+        "event_type",
+        "previous_status",
+        "new_status",
+        "reason",
+        "occurred_at",
+        "source"
+      ],
+      "title": "FindingEvent",
+      "type": "object"
+    },
+    "FindingEventSource": {
+      "additionalProperties": false,
+      "description": "Repository source that caused a finding event.",
+      "properties": {
+        "key": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Key",
+          "type": "string"
+        },
+        "kind": {
+          "$ref": "#/$defs/FindingSourceKind"
+        }
+      },
+      "required": [
+        "kind",
+        "key"
+      ],
+      "title": "FindingEventSource",
+      "type": "object"
+    },
+    "FindingEventType": {
+      "description": "State transition represented by a finding event.",
+      "enum": [
+        "opened",
+        "reopened",
+        "updated",
+        "resolved"
+      ],
+      "title": "FindingEventType",
+      "type": "string"
+    },
+    "FindingKind": {
+      "description": "Published finding document kind.",
+      "enum": [
+        "finding_event",
+        "current_finding"
+      ],
+      "title": "FindingKind",
+      "type": "string"
+    },
+    "FindingReason": {
+      "description": "Known reasons for publishing a finding transition.",
+      "enum": [
+        "exposure_open",
+        "exposure_reopened",
+        "reconciliation_repair",
+        "service_changed",
+        "address_changed",
+        "rule_changed",
+        "ownership_removed",
+        "exposure_closed",
+        "rule_disabled",
+        "rule_no_longer_matches"
+      ],
+      "title": "FindingReason",
+      "type": "string"
+    },
+    "FindingRecord": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "open"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "resolution_reason": {
+                "type": "null"
+              },
+              "resolved_at": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "resolved"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "resolution_reason": {
+                "not": {
+                  "type": "null"
+                }
+              },
+              "resolved_at": {
+                "not": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "description": "Current state and history for one rule/target/service finding.",
+      "properties": {
+        "description": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "title": "Description",
+          "type": "string"
+        },
+        "fingerprint": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Fingerprint",
+          "type": "string"
+        },
+        "first_opened_at": {
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,6})?Z$",
+          "title": "First Opened At",
+          "type": "string"
+        },
+        "generation": {
+          "minimum": 1,
+          "title": "Generation",
+          "type": "integer"
+        },
+        "last_changed_at": {
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,6})?Z$",
+          "title": "Last Changed At",
+          "type": "string"
+        },
+        "last_seen_at": {
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,6})?Z$",
+          "title": "Last Seen At",
+          "type": "string"
+        },
+        "observed_address": {
+          "description": "Public IPv4; RFC 5737 ranges are accepted for examples.",
+          "format": "ipv4",
+          "maxLength": 15,
+          "minLength": 7,
+          "title": "Observed Address",
+          "type": "string"
+        },
+        "port": {
+          "maximum": 65535,
+          "minimum": 1,
+          "title": "Port",
+          "type": "integer"
+        },
+        "protocol": {
+          "$ref": "#/$defs/TransportProtocol"
+        },
+        "provider": {
+          "$ref": "#/$defs/CloudProvider"
+        },
+        "resolution_reason": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/FindingResolutionReason"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "resolved_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,6})?Z$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Resolved At"
+        },
+        "rule_key": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[a-z0-9][a-z0-9._-]{0,127}$",
+          "title": "Rule Key",
+          "type": "string"
+        },
+        "service": {
+          "$ref": "#/$defs/FindingService"
+        },
+        "severity": {
+          "$ref": "#/$defs/FindingSeverity"
+        },
+        "status": {
+          "$ref": "#/$defs/FindingStatus"
+        },
+        "target_id": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Target Id",
+          "type": "string"
+        },
+        "title": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        },
+        "version": {
+          "minimum": 1,
+          "title": "Version",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "fingerprint",
+        "target_id",
+        "provider",
+        "generation",
+        "protocol",
+        "port",
+        "rule_key",
+        "status",
+        "severity",
+        "title",
+        "description",
+        "observed_address",
+        "service",
+        "first_opened_at",
+        "last_seen_at",
+        "last_changed_at",
+        "resolved_at",
+        "resolution_reason",
+        "version"
+      ],
+      "title": "FindingRecord",
+      "type": "object"
+    },
+    "FindingResolutionReason": {
+      "description": "Known reasons that a finding is no longer open.",
+      "enum": [
+        "ownership_removed",
+        "exposure_closed",
+        "rule_disabled",
+        "rule_no_longer_matches"
+      ],
+      "title": "FindingResolutionReason",
+      "type": "string"
+    },
+    "FindingService": {
+      "additionalProperties": false,
+      "description": "Normalized service identity attached to a finding.",
+      "properties": {
+        "banner_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Banner Sha256"
+        },
+        "certificate_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Certificate Sha256"
+        },
+        "identity_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Identity Sha256",
+          "type": "string"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Name"
+        },
+        "product": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Product"
+        },
+        "ssh_host_key_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Ssh Host Key Sha256"
+        },
+        "version": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Version"
+        }
+      },
+      "required": [
+        "name",
+        "product",
+        "version",
+        "certificate_sha256",
+        "ssh_host_key_sha256",
+        "banner_sha256",
+        "identity_sha256"
+      ],
+      "title": "FindingService",
+      "type": "object"
+    },
+    "FindingSeverity": {
+      "description": "Detection-rule severity copied into a finding.",
+      "enum": [
+        "informational",
+        "low",
+        "medium",
+        "high",
+        "critical"
+      ],
+      "title": "FindingSeverity",
+      "type": "string"
+    },
+    "FindingSourceKind": {
+      "description": "Repository source that caused a finding transition.",
+      "enum": [
+        "scan_attempt",
+        "target_event",
+        "reconciliation"
+      ],
+      "title": "FindingSourceKind",
+      "type": "string"
+    },
+    "FindingStatus": {
+      "description": "Current lifecycle state of a finding.",
+      "enum": [
+        "open",
+        "resolved"
+      ],
+      "title": "FindingStatus",
+      "type": "string"
+    },
+    "TransportProtocol": {
+      "description": "Transport protocol scanned by the current runtime.",
+      "enum": [
+        "tcp"
+      ],
+      "title": "TransportProtocol",
+      "type": "string"
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/Roblox/portscanner/main/schemas/finding.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "finding_event"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "properties": {
+          "event": {
+            "not": {
+              "type": "null"
+            }
+          }
+        },
+        "required": [
+          "event"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "kind": {
+            "const": "current_finding"
+          }
+        },
+        "required": [
+          "kind"
+        ]
+      },
+      "then": {
+        "not": {
+          "required": [
+            "event"
+          ]
+        }
+      }
+    }
+  ],
+  "description": "Exact parser finding object published through the S3 handoff outbox.",
+  "properties": {
+    "event": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FindingEvent"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "finding": {
+      "$ref": "#/$defs/FindingRecord"
+    },
+    "kind": {
+      "$ref": "#/$defs/FindingKind"
+    },
+    "schema_version": {
+      "const": "1.0",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "kind",
+    "finding"
+  ],
+  "title": "Finding",
+  "type": "object"
+}

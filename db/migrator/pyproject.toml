@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "portscanner-migrator"
+version = "0.1.0"
+description = "Transactional PostgreSQL migrator for the ACT data plane"
+requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+classifiers = [
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "awslambdaric>=4,<5",
+    "boto3",
+    "psycopg[binary]",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+
+[project.scripts]
+act-migrate = "act_migrator.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --import-mode=importlib"
+markers = [
+    "integration: requires TEST_DATABASE_URL",
+]

@@ -1,0 +1,70 @@
+# SPDX-FileCopyrightText: 2026 Portscanner contributors
+# SPDX-License-Identifier: MIT
+
+title = "Portscanner public repository secret policy"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "committed-cloud-account-id"
+description = "Cloud account-shaped identifier committed outside the exact synthetic fixture"
+regex = '''(?i)(?:account|tenant|project)[-_ ]?(?:id|number)?[^\n]{0,24}\b([0-9]{12})\b'''
+secretGroup = 1
+keywords = [
+  "account",
+  "tenant",
+  "project",
+]
+
+[[rules.allowlists]]
+description = "Exact synthetic account fixture"
+regexTarget = "secret"
+regexes = [
+  '''^123456789012$''',
+  '''^000000000000$''',
+  '''^222222222222$''',
+]
+
+[[rules]]
+id = "absolute-home-directory"
+description = "Absolute developer home path"
+regex = '''(?:/Users/|/home/)[A-Za-z0-9._-]+/[^\s"'<>]+'''
+keywords = [
+  "/Users/",
+  "/home/",
+]
+
+[[allowlists]]
+description = "Public project URL is intentionally present"
+regexTarget = "match"
+regexes = [
+  '''https://github\.com/Roblox/portscanner(?:/[A-Za-z0-9._~/%#?=-]*)?''',
+]
+
+[[allowlists]]
+description = "Generated local caches and dependency worktrees are never publishable inputs"
+paths = [
+  '''(^|/)\.git/''',
+  '''(^|/)\.mypy_cache/''',
+  '''(^|/)\.pytest_cache/''',
+  '''(^|/)\.ruff_cache/''',
+  '''(^|/)\.terraform/''',
+  '''(^|/)\.venv/''',
+  '''(^|/)__pycache__/''',
+  '''(^|/)bin/''',
+]
+
+[[allowlists]]
+description = "Deterministic SHA-256 identifiers in versioned JSON contracts"
+regexTarget = "match"
+regexes = [
+  '''"(?:directive_id|event_id|event_key|finding_id|fingerprint|identity_sha256|observation_id|policy_change_id|result_id|run_key|target_id|trace_id)"\s*:\s*"[0-9a-f]{64}"''',
+]
+
+[[allowlists]]
+description = "Generated finding example uses a deterministic event-key digest"
+condition = "AND"
+regexTarget = "secret"
+paths = ['''^examples/finding\.json$''']
+regexes = ['''^[0-9a-f]{64}$''']

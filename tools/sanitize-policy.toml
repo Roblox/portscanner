@@ -1,0 +1,218 @@
+# SPDX-FileCopyrightText: 2026 Portscanner contributors
+# SPDX-License-Identifier: MIT
+
+version = 1
+max_text_bytes = 2097152
+max_binary_bytes = 524288
+
+# Binary files are denied by default. An intentionally distributable binary must be
+# reviewed and listed as an exact repository-relative path plus lowercase SHA-256:
+# { path = "docs/example.png", sha256 = "<64 lowercase hex characters>" }
+binary_allowlist = []
+
+# These are the only account-shaped fixtures accepted in fixture-scoped paths.
+synthetic_account_ids = ["000000000000", "123456789012", "222222222222"]
+
+# Live-looking cloud identifiers are allowed only when both the path and exact value
+# match this fixture policy. New values require explicit review.
+synthetic_fixture_paths = [
+  ".gitleaks.toml",
+  "**/tests/**",
+  "operator/**/*_test.go",
+  "operator/config/samples/**",
+  "docs/**",
+  "examples/**",
+  "terraform/aws/**/*.tftest.hcl",
+  "terraform/aws/examples/**",
+  "tools/sanitize-policy.toml",
+]
+synthetic_aws_resource_ids = [
+  "eipalloc-cccccccc",
+  "eipassoc-dddddddd",
+  "eni-00000000",
+  "eni-0123456789abcdef0",
+  "eni-aaaaaaaa",
+  "eni-bbbbbbbb",
+  "i-0123456789abcdef0",
+  "i-bbbbbbbb",
+  "rtb-00000000000000001",
+  "rtb-00000000000000002",
+  "rtb-00000000000000003",
+  "rtb-00000000000000004",
+  "sg-00000000000000001",
+  "sg-00000000000000002",
+  "sg-0123456789abcdef0",
+  "sg-0fedcba9876543210",
+  "sg-11111111",
+  "sg-22222222",
+  "sg-deadbeef",
+  "subnet-00000000000000001",
+  "subnet-00000000000000002",
+  "subnet-00000000000000003",
+  "subnet-00000000000000004",
+  "subnet-0123456789abcdef0",
+  "subnet-0123456789abcdef1",
+  "subnet-0123456789abcdef2",
+  "subnet-0123456789abcdef3",
+  "vpc-00000000000000001",
+  "vpc-00000000000000002",
+  "vpc-0123456789abcdef0",
+  "vpce-00000000000000001",
+  "vpce-00000000000000002",
+  "vpce-00000000000000003",
+  "vpce-00000000000000004",
+  "vpce-00000000000000005",
+  "vpce-00000000000000006",
+  "vpce-00000000000000007",
+  "vpce-00000000000000008",
+  "vpce-00000000000000009",
+  "vpce-0000000000000000a",
+  "vpce-0000000000000000b",
+  "vpce-0000000000000000c",
+]
+synthetic_aws_arns = [
+  "arn:aws:iam::{account_id}:role/collector",
+  "arn:aws:iam::000000000000:role/collector",
+  "arn:aws:events:us-east-1:123456789012:event-bus/scan-central-central",
+  "arn:aws:events:us-east-1:123456789012:event-bus/test-central",
+  "arn:aws:cloudtrail:us-east-1:123456789012:trail/organization-management",
+  "arn:aws:cloudtrail:us-east-1:123456789012:trail/test-management",
+  "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy",
+  "arn:aws:iam::123456789012:role/example-central-collector",
+  "arn:aws:iam::123456789012:role/example-member-collector",
+  "arn:aws:iam::123456789012:role/example-central-snapshot",
+  "arn:aws:iam::123456789012:role/example-central-signals",
+  "arn:aws:iam::123456789012:role/test-generator",
+  "arn:aws:iam::123456789012:role/test-installer",
+  "arn:aws:iam::123456789012:role/test-migrator",
+  "arn:aws:iam::123456789012:role/test-outbox",
+  "arn:aws:iam::123456789012:role/test-parser",
+  "arn:aws:iam::123456789012:role/test-processor",
+  "arn:aws:iam::123456789012:role/test-publisher",
+  "arn:aws:iam::123456789012:role/test-rescan",
+  "arn:aws:iam::123456789012:role/test-scanner",
+  "arn:aws:iam::123456789012:role/test-signals",
+  "arn:aws:iam::123456789012:role/test-snapshot",
+  "arn:aws:iam::123456789012:role/test-target-projector",
+  "arn:aws:sqs:us-east-1:123456789012:test-coverage",
+  "arn:aws:sqs:us-east-1:123456789012:test-priority",
+  "arn:aws:sqs:us-east-1:123456789012:test-result",
+  "arn:aws:sqs:us-east-1:123456789012:test-signal",
+  "arn:aws:sqs:us-east-1:123456789012:test-signal-dlq",
+  "arn:aws:sqs:us-east-1:123456789012:test-target-event",
+  "arn:aws:dynamodb:us-east-1:123456789012:table/test-inventory/stream/2026-08-07T00:00:00.000",
+  "arn:aws:secretsmanager:us-east-1:123456789012:secret:test-application",
+  "arn:aws:secretsmanager:us-east-1:123456789012:secret:test-master",
+]
+
+documentation_ipv4_networks = [
+  "192.0.2.0/24",
+  "198.51.100.0/24",
+  "203.0.113.0/24",
+]
+documentation_ipv6_networks = ["2001:db8::/32"]
+
+# Denylist-definition files necessarily contain forbidden patterns. Only internal-term
+# matching is suppressed for these exact files. The sanitizer policy's exact synthetic
+# cloud values are separately path-scoped above; path, size, symlink, address, and PII
+# checks still apply.
+deny_term_definition_paths = [
+  ".gitleaks.toml",
+  ".gitignore",
+  "tools/sanitize-policy.toml",
+]
+
+forbidden_path_globs = [
+  "*.tfstate",
+  "*.tfstate.*",
+  "*.tfvars",
+  "*.tfvars.json",
+  "*.auto.tfvars",
+  "*.tfplan",
+  "*.plan",
+  "*.pem",
+  "*.key",
+  "*.p12",
+  "*.pfx",
+  "*.pptx",
+  "*.kubeconfig",
+  "*kubeconfig*",
+  "kubeconfig",
+  "id_dsa",
+  "id_ecdsa",
+  "id_xmss",
+  "id_rsa",
+  "id_ed25519",
+  "**/.kube/config",
+  ".env",
+  ".env.*",
+]
+
+binary_extensions = [
+  ".7z",
+  ".avi",
+  ".bmp",
+  ".class",
+  ".dmg",
+  ".doc",
+  ".docx",
+  ".exe",
+  ".gif",
+  ".gz",
+  ".ico",
+  ".jar",
+  ".jpeg",
+  ".jpg",
+  ".mov",
+  ".mp3",
+  ".mp4",
+  ".o",
+  ".pdf",
+  ".png",
+  ".so",
+  ".tar",
+  ".tgz",
+  ".webp",
+  ".xls",
+  ".xlsx",
+  ".zip",
+]
+
+[[deny_terms]]
+id = "internal-domain"
+pattern = '''(?i)\b(?:[a-z0-9-]+\.)+(?:corp|internal|intranet|private|local)\b'''
+allow_paths = []
+allow_patterns = []
+
+[[deny_terms]]
+id = "internal-domain-alias"
+pattern = '''(?i)\b(?:rbx\.com|rbxcdn\.com|roblox\.local)\b'''
+allow_paths = []
+allow_patterns = []
+
+[[deny_terms]]
+id = "internal-project-term"
+pattern = '''(?i)\b(?:netsec|security-tools)\b'''
+allow_paths = []
+allow_patterns = []
+
+[[deny_terms]]
+id = "public-owner-name"
+pattern = '''(?i)\broblox\b'''
+allow_paths = [
+  "LICENSE",
+  "NOTICE",
+  "NOTICE.md",
+  "LICENSES/**",
+  "THIRD_PARTY_NOTICES.md",
+  "**/LICENSE",
+  "**/NOTICE",
+  "**/NOTICE.md",
+]
+allow_patterns = [
+  '''(?:https://)?github\.com/Roblox/portscanner(?:/[A-Za-z0-9._~/%#?=:+-]*)?''',
+  '''SPDX-FileCopyrightText\s*[:=]\s*"?2026 Roblox(?: Corporation)?"?''',
+  '''Copyright:?\s*2026 Roblox(?: Corporation)?''',
+  '''authors\s*=\s*\[\{\s*name\s*=\s*"Roblox"\s*\}\]''',
+  '''https://raw\.githubusercontent\.com/Roblox/portscanner(?:/[A-Za-z0-9._~/%#?=:+-]*)?''',
+]

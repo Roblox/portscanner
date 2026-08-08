@@ -1,0 +1,49 @@
+# SPDX-FileCopyrightText: 2026 Portscanner contributors
+# SPDX-License-Identifier: MIT
+
+default_language_version:
+  python: python3.12
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: check-added-large-files
+        args:
+          - --maxkb=512
+      - id: check-case-conflict
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-symlinks
+      - id: check-toml
+      - id: check-yaml
+        args:
+          - --unsafe
+        exclude: ^operator/chart/portscanner/templates/
+      - id: debug-statements
+      - id: detect-private-key
+      - id: end-of-file-fixer
+      - id: mixed-line-ending
+        args:
+          - --fix=no
+      - id: trailing-whitespace
+
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+
+  - repo: local
+    hooks:
+      - id: publication-sanitizer
+        name: publication sanitizer
+        entry: python3 tools/sanitize.py --working-tree
+        language: system
+        pass_filenames: false
+        always_run: true
+      - id: sanitizer-unit-tests
+        name: sanitizer unit tests
+        entry: python3 -m unittest discover -s tools/tests -p test_*.py
+        language: system
+        pass_filenames: false
+        files: ^tools/(sanitize(?:-policy\.toml|\.py)|tests/test_sanitize\.py)$

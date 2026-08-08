@@ -1,0 +1,111 @@
+# Copyright 2026 Roblox Corporation
+# SPDX-License-Identifier: Apache-2.0
+
+nameOverride: ""
+fullnameOverride: ""
+
+operator:
+  replicaCount: 1
+  image:
+    repository: portscanner-operator
+    # Replace this non-runnable placeholder with the published immutable digest.
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+    pullPolicy: IfNotPresent
+  serviceAccount:
+    create: true
+    name: ""
+    annotations: {}
+    automountServiceAccountToken: true
+  rbac:
+    create: true
+  leaderElection: true
+  leaderElectionID: portscanner-operator.scanning.portscanner.io
+  maxConcurrentReconciles: 4
+  metricsBindAddress: ":8080"
+  healthProbeBindAddress: ":8081"
+  metricsPort: 8080
+  healthProbePort: 8081
+  podAnnotations: {}
+  podLabels: {}
+  podSecurityContext:
+    runAsNonRoot: true
+    seccompProfile:
+      type: RuntimeDefault
+  securityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop:
+        - ALL
+    readOnlyRootFilesystem: true
+    runAsNonRoot: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+      ephemeral-storage: 32Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+      ephemeral-storage: 256Mi
+  tmpSizeLimit: 64Mi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+scanner:
+  # Empty means the Helm release namespace. List every namespace that will
+  # contain Scanner resources when the chart should provision their SA/RBAC.
+  namespaces: []
+  image:
+    repository: portscanner-scanner
+    # Replace this non-runnable placeholder with the published immutable digest.
+    digest: sha256:0000000000000000000000000000000000000000000000000000000000000000
+    pullPolicy: IfNotPresent
+  serviceAccount:
+    create: true
+    name: ""
+    annotations: {}
+    automountServiceAccountToken: false
+  rbac:
+    create: true
+    # Scanner Jobs need no Kubernetes permissions by default.
+    rules: []
+  authorization:
+    # Optional deployment policy. Empty allowedCidrs leaves account/ownership
+    # authorization as the scope gate; scanner-enforced denies still apply first.
+    allowedCidrs: []
+    deniedCidrs: []
+  result:
+    bucket: replace-with-results-bucket
+    prefix: scan-results
+  priority:
+    highThreshold: 100
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+      ephemeral-storage: 128Mi
+    limits:
+      cpu: "1"
+      memory: 512Mi
+      ephemeral-storage: 1Gi
+  tmpSizeLimit: 256Mi
+  nodeSelector: {}
+  tolerations: []
+
+generator:
+  rbac:
+    create: true
+    # EKS access entry group used by the external generator Lambda.
+    group: "portscanner:generator"
+
+priorityClasses:
+  create: true
+  normal:
+    name: portscanner-normal
+    value: 100000
+    preemptionPolicy: Never
+  high:
+    name: portscanner-high
+    value: 1000000
+    preemptionPolicy: Never

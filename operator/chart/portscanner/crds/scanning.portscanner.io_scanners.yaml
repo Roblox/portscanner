@@ -1,0 +1,397 @@
+# Copyright 2026 Roblox Corporation
+# SPDX-License-Identifier: Apache-2.0
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.21.0
+  name: scanners.scanning.portscanner.io
+spec:
+  group: scanning.portscanner.io
+  names:
+    categories:
+    - portscanner
+    kind: Scanner
+    listKind: ScannerList
+    plural: scanners
+    shortNames:
+    - scan
+    singular: scanner
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.profile
+      name: Profile
+      type: string
+    - jsonPath: .spec.priority
+      name: Priority
+      type: integer
+    - jsonPath: .status.outcome
+      name: Outcome
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Scanner represents exactly one target and at most one Kubernetes
+          Job.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: ScannerSpec defines one bounded, one-shot scan request.
+            properties:
+              cancel:
+                description: Cancel requests cancellation without deleting the Scanner
+                  resource.
+                type: boolean
+              deadline:
+                description: |-
+                  Deadline is the latest time at which the generator may dispatch this
+                  request. It does not truncate an already-dispatched scan.
+                format: date-time
+                type: string
+              directiveId:
+                description: DirectiveID is the shared contract's deterministic scan
+                  directive identifier.
+                pattern: ^[0-9a-f]{64}$
+                type: string
+              eventId:
+                description: EventID is the shared contract's deterministic source
+                  event identifier.
+                pattern: ^[0-9a-f]{64}$
+                type: string
+              notAfter:
+                description: |-
+                  NotAfter is the source event's absolute execution cutoff. It becomes the
+                  Job active deadline and is enforced independently by the scanner.
+                format: date-time
+                type: string
+              ports:
+                description: |-
+                  Ports is an explicit set of TCP ports. Values are deduplicated before
+                  being passed to the scanner.
+                items:
+                  format: int32
+                  maximum: 65535
+                  minimum: 1
+                  type: integer
+                maxItems: 256
+                type: array
+                x-kubernetes-list-type: set
+              priority:
+                description: Priority is mapped to the configured high or normal PriorityClass.
+                format: int32
+                maximum: 1000
+                minimum: 0
+                type: integer
+              profile:
+                description: Profile selects scanner behavior.
+                enum:
+                - fast-full-tcp
+                - targeted-tcp
+                - deep
+                type: string
+              ranges:
+                description: Ranges is an explicit set of inclusive TCP port ranges.
+                items:
+                  description: PortRange is an inclusive TCP port range.
+                  properties:
+                    end:
+                      format: int32
+                      maximum: 65535
+                      minimum: 1
+                      type: integer
+                    start:
+                      format: int32
+                      maximum: 65535
+                      minimum: 1
+                      type: integer
+                  required:
+                  - end
+                  - start
+                  type: object
+                maxItems: 256
+                type: array
+              reason:
+                description: Reason describes why the scan was requested.
+                enum:
+                - new_target
+                - target_change
+                - policy_change
+                - coverage
+                - manual
+                type: string
+              retryLimit:
+                default: 0
+                description: RetryLimit maps to Job backoffLimit.
+                format: int32
+                maximum: 6
+                minimum: 0
+                type: integer
+              sourceTimestamps:
+                description: SourceTimestamps records source event timing.
+                properties:
+                  eventAt:
+                    description: EventAt is when the source event occurred.
+                    format: date-time
+                    type: string
+                  observedAt:
+                    description: ObservedAt is when the source observed the target
+                      state.
+                    format: date-time
+                    type: string
+                required:
+                - eventAt
+                - observedAt
+                type: object
+              target:
+                description: Target is the only scan target for this resource.
+                properties:
+                  address:
+                    description: |-
+                      Address is the canonical public IPv4 literal passed to the scanner. RFC
+                      5737 documentation addresses remain valid for examples and tests.
+                    format: ipv4
+                    maxLength: 15
+                    minLength: 7
+                    pattern: ^([0-9]{1,3}[.]){3}[0-9]{1,3}$
+                    type: string
+                    x-kubernetes-validations:
+                    - message: address must be a public IPv4 literal
+                      rule: '!self.startsWith(''0.'') && !self.startsWith(''10.'')
+                        && !self.startsWith(''127.'') && !self.startsWith(''169.254.'')
+                        && !self.startsWith(''192.168.'') && !self.matches(''^100[.](6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])[.]'')
+                        && !self.matches(''^172[.](1[6-9]|2[0-9]|3[01])[.]'') && !self.matches(''^198[.](18|19)[.]'')
+                        && !self.matches(''^(22[4-9]|23[0-9]|24[0-9]|25[0-5])[.]'')'
+                  generation:
+                    description: Generation identifies the source-side revision of
+                      this target.
+                    format: int64
+                    minimum: 1
+                    type: integer
+                  location:
+                    description: Location is the AWS region containing the target.
+                    maxLength: 32
+                    minLength: 9
+                    pattern: ^[a-z]{2}(-[a-z0-9]+)+-[0-9]+$
+                    type: string
+                  privateAddress:
+                    description: PrivateAddress is the target's canonical source-side
+                      IPv4 address.
+                    format: ipv4
+                    maxLength: 15
+                    minLength: 7
+                    pattern: ^([0-9]{1,3}[.]){3}[0-9]{1,3}$
+                    type: string
+                  provider:
+                    description: Provider is the shared target's cloud provider.
+                    enum:
+                    - aws
+                    type: string
+                  resourceId:
+                    description: ResourceID is the AWS network interface identifier.
+                    maxLength: 36
+                    minLength: 12
+                    pattern: ^eni-[0-9a-f]{8,32}$
+                    type: string
+                  scopeId:
+                    description: ScopeID is the AWS account that owns the target.
+                    pattern: ^[0-9]{12}$
+                    type: string
+                  targetId:
+                    description: TargetID is the shared contract's deterministic target
+                      identifier.
+                    pattern: ^[0-9a-f]{64}$
+                    type: string
+                required:
+                - address
+                - generation
+                - location
+                - privateAddress
+                - provider
+                - resourceId
+                - scopeId
+                - targetId
+                type: object
+              traceId:
+                description: TraceID correlates logs and result transport across systems.
+                maxLength: 128
+                minLength: 1
+                pattern: ^[A-Za-z0-9][A-Za-z0-9._=-]{0,127}$
+                type: string
+              ttlSecondsAfterFinished:
+                default: 3600
+                description: |-
+                  TTLSecondsAfterFinished controls cleanup of the terminal Scanner and its
+                  owned Job.
+                format: int32
+                minimum: 0
+                type: integer
+            required:
+            - deadline
+            - directiveId
+            - eventId
+            - notAfter
+            - priority
+            - profile
+            - reason
+            - sourceTimestamps
+            - target
+            - traceId
+            type: object
+            x-kubernetes-validations:
+            - message: targeted-tcp requires at least one port or range
+              rule: self.profile != 'targeted-tcp' || (has(self.ports) && size(self.ports)
+                > 0) || (has(self.ranges) && size(self.ranges) > 0)
+            - message: each port range start must be less than or equal to end
+              rule: '!has(self.ranges) || self.ranges.all(r, r.start <= r.end)'
+            - message: combined TCP port and range coverage must contain at most 256
+                terms
+              rule: '(!has(self.ports) ? 0 : size(self.ports)) + (!has(self.ranges)
+                ? 0 : size(self.ranges)) <= 256'
+            - message: deadline must not be later than notAfter
+              rule: self.deadline <= self.notAfter
+            - message: scan execution fields are immutable; only cancel may change
+              rule: self.target == oldSelf.target && self.eventId == oldSelf.eventId
+                && self.directiveId == oldSelf.directiveId && self.traceId == oldSelf.traceId
+                && self.reason == oldSelf.reason && self.profile == oldSelf.profile
+                && ((!has(self.ports) && !has(oldSelf.ports)) || (has(self.ports)
+                && has(oldSelf.ports) && self.ports == oldSelf.ports)) && ((!has(self.ranges)
+                && !has(oldSelf.ranges)) || (has(self.ranges) && has(oldSelf.ranges)
+                && self.ranges == oldSelf.ranges)) && self.priority == oldSelf.priority
+                && self.deadline == oldSelf.deadline && self.notAfter == oldSelf.notAfter
+                && self.sourceTimestamps == oldSelf.sourceTimestamps && self.retryLimit
+                == oldSelf.retryLimit && self.ttlSecondsAfterFinished == oldSelf.ttlSecondsAfterFinished
+          status:
+            description: ScannerStatus exposes execution lifecycle only, never raw
+              scan evidence.
+            properties:
+              activeJobRef:
+                description: ActiveJobRef points at the pending or running Job.
+                properties:
+                  name:
+                    type: string
+                  namespace:
+                    type: string
+                  uid:
+                    description: |-
+                      UID is a type that holds unique ID values, including UUIDs.  Because we
+                      don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                      intent and helps make sure that UIDs and names do not get conflated.
+                    type: string
+                required:
+                - name
+                - namespace
+                type: object
+              completedAt:
+                description: CompletedAt is when execution reached a terminal outcome.
+                format: date-time
+                type: string
+              conditions:
+                description: Conditions summarize acceptance, Job availability, and
+                  completion.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              observedGeneration:
+                description: ObservedGeneration is the latest Scanner generation processed.
+                format: int64
+                type: integer
+              outcome:
+                description: Outcome is the current lifecycle outcome.
+                enum:
+                - Pending
+                - Running
+                - Succeeded
+                - Failed
+                - Cancelled
+                - Expired
+                type: string
+              queuedAt:
+                description: QueuedAt is when the operator accepted the request.
+                format: date-time
+                type: string
+              startedAt:
+                description: StartedAt is when the Job first became active.
+                format: date-time
+                type: string
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

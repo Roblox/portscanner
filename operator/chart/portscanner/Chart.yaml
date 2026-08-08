@@ -1,0 +1,15 @@
+# Copyright 2026 Roblox Corporation
+# SPDX-License-Identifier: Apache-2.0
+
+apiVersion: v2
+name: portscanner
+description: A public one-shot Kubernetes port scanner operator.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+kubeVersion: ">=1.35.0-0 <1.37.0-0"
+home: https://github.com/Roblox/portscanner
+sources:
+  - https://github.com/Roblox/portscanner
+annotations:
+  licenses: Apache-2.0

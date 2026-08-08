@@ -1,0 +1,99 @@
+# SPDX-FileCopyrightText: 2026 Portscanner contributors
+# SPDX-License-Identifier: MIT
+
+name: CodeQL
+
+on:
+  pull_request:
+    paths:
+      - "**/*.py"
+      - "**/*.go"
+      - "**/go.mod"
+      - "**/go.sum"
+      - ".github/workflows/codeql.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "**/*.py"
+      - "**/*.go"
+      - "**/go.mod"
+      - "**/go.sum"
+      - ".github/workflows/codeql.yml"
+  schedule:
+    - cron: "23 5 * * 3"
+
+permissions:
+  actions: read
+  contents: read
+  security-events: write
+
+jobs:
+  discover:
+    name: Discover languages
+    runs-on: ubuntu-latest
+    outputs:
+      languages: ${{ steps.languages.outputs.languages }}
+      present: ${{ steps.languages.outputs.present }}
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - id: languages
+        name: Select supported languages
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import subprocess
+
+          files = subprocess.check_output(
+              ["git", "ls-files"], text=True
+          ).splitlines()
+          languages = []
+          if any(path.endswith(".py") for path in files):
+              languages.append("python")
+          if any(path.endswith(".go") for path in files):
+              languages.append("go")
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(
+                  "languages=" + json.dumps(languages, separators=(",", ":")) + "\n"
+              )
+              handle.write(f"present={'true' if languages else 'false'}\n")
+          PY
+
+  analyze:
+    name: Analyze ${{ matrix.language }}
+    needs:
+      - discover
+    if: needs.discover.outputs.present == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        language: ${{ fromJSON(needs.discover.outputs.languages) }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - name: Set up Go
+        if: matrix.language == 'go'
+        uses: actions/setup-go@v7.0.0
+        with:
+          go-version-file: operator/go.mod
+          cache-dependency-path: operator/go.sum
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4.37.4
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-extended
+
+      - name: Autobuild Go
+        if: matrix.language == 'go'
+        uses: github/codeql-action/autobuild@v4.37.4
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@v4.37.4
+        with:
+          category: /language:${{ matrix.language }}

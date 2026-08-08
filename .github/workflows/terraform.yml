@@ -1,0 +1,118 @@
+# SPDX-FileCopyrightText: 2026 Portscanner contributors
+# SPDX-License-Identifier: MIT
+
+name: Terraform
+
+on:
+  pull_request:
+    paths:
+      - "**/*.tf"
+      - "**/.terraform.lock.hcl"
+      - "terraform/aws/scripts/**/*.sh"
+      - ".github/workflows/terraform.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "**/*.tf"
+      - "**/.terraform.lock.hcl"
+      - "terraform/aws/scripts/**/*.sh"
+      - ".github/workflows/terraform.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: terraform-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: hashicorp/setup-terraform@v4.0.1
+        with:
+          terraform_version: "1.7.4"
+
+      - name: Check formatting
+        run: terraform fmt -check -recursive -diff
+
+      - name: Check deployment helper safety
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n terraform/aws/scripts/deploy.sh
+          bash -n terraform/aws/scripts/build-images.sh
+          bash terraform/aws/scripts/tests/build-images-test.sh
+
+  validate:
+    name: Init and validate
+    runs-on: ubuntu-latest
+    env:
+      AWS_EC2_METADATA_DISABLED: "true"
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: hashicorp/setup-terraform@v4.0.1
+        with:
+          terraform_version: "1.7.4"
+
+      - name: Validate every Terraform directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -A roots=()
+          while IFS= read -r file; do
+            roots["$(dirname "${file}")"]=1
+          done < <(git ls-files '*.tf' '**/*.tf')
+
+          if [[ "${#roots[@]}" -eq 0 ]]; then
+            echo "No Terraform files are present."
+            exit 0
+          fi
+
+          for directory in "${!roots[@]}"; do
+            echo "Validating ${directory}"
+            terraform -chdir="${directory}" init -backend=false -input=false -no-color
+            terraform -chdir="${directory}" validate -no-color
+          done
+
+  tflint:
+    name: TFLint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: "1.26.x"
+          cache: false
+
+      - name: Install TFLint
+        run: go install github.com/terraform-linters/tflint@v0.64.0
+
+      - name: Lint every Terraform directory
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -A roots=()
+          while IFS= read -r file; do
+            roots["$(dirname "${file}")"]=1
+          done < <(git ls-files '*.tf' '**/*.tf')
+
+          if [[ "${#roots[@]}" -eq 0 ]]; then
+            echo "No Terraform files are present."
+            exit 0
+          fi
+
+          for directory in "${!roots[@]}"; do
+            echo "Linting ${directory}"
+            (
+              cd "${directory}"
+              tflint --init
+              tflint --format compact
+            )
+          done

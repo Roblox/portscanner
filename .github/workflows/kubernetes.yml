@@ -1,0 +1,91 @@
+# SPDX-FileCopyrightText: 2026 Portscanner contributors
+# SPDX-License-Identifier: MIT
+
+name: Kubernetes manifests
+
+on:
+  pull_request:
+    paths:
+      - "**/*.yaml"
+      - "**/*.yml"
+      - "**/Chart.yaml"
+      - "**/values.yaml"
+      - ".github/workflows/kubernetes.yml"
+  push:
+    branches:
+      - main
+    paths:
+      - "operator/config/**"
+      - "operator/chart/**"
+      - ".github/workflows/kubernetes.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kubernetes-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  validate:
+    name: Kustomize, Helm, kubeconform
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-go@v7.0.0
+        with:
+          go-version: "1.26.x"
+          cache: false
+
+      - name: Install manifest tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          go install sigs.k8s.io/kustomize/kustomize/v5@v5.8.1
+          go install helm.sh/helm/v3/cmd/helm@v3.20.1
+          go install github.com/yannh/kubeconform/cmd/kubeconform@v0.8.0
+
+      - name: Build and validate Kustomize roots
+        shell: bash
+        run: |
+          set -euo pipefail
+          count=0
+          while IFS= read -r file; do
+            directory="$(dirname "${file}")"
+            rendered="${RUNNER_TEMP}/kustomize-${count}.yaml"
+            echo "Building ${directory}"
+            kustomize build "${directory}" > "${rendered}"
+            kubeconform \
+              -strict \
+              -summary \
+              -ignore-missing-schemas \
+              "${rendered}"
+            count=$((count + 1))
+          done < <(git ls-files 'kustomization.yaml' '**/kustomization.yaml')
+          if [[ "${count}" -eq 0 ]]; then
+            echo "No Kustomize roots are present."
+          fi
+
+      - name: Lint, render, and validate Helm charts
+        shell: bash
+        run: |
+          set -euo pipefail
+          count=0
+          while IFS= read -r chart; do
+            directory="$(dirname "${chart}")"
+            rendered="${RUNNER_TEMP}/helm-${count}.yaml"
+            echo "Rendering ${directory}"
+            helm lint "${directory}" --kube-version 1.36.0
+            helm template "portscanner-ci-${count}" "${directory}" \
+              --kube-version 1.36.0 > "${rendered}"
+            kubeconform \
+              -strict \
+              -summary \
+              -ignore-missing-schemas \
+              "${rendered}"
+            count=$((count + 1))
+          done < <(git ls-files 'Chart.yaml' '**/Chart.yaml')
+          if [[ "${count}" -eq 0 ]]; then
+            echo "No Helm charts are present."
+          fi

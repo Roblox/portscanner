@@ -1,0 +1,713 @@
+{
+  "$defs": {
+    "AddressFamily": {
+      "description": "Network address family.",
+      "enum": [
+        "ipv4"
+      ],
+      "title": "AddressFamily",
+      "type": "string"
+    },
+    "CloudProvider": {
+      "description": "Cloud provider represented by a target.",
+      "enum": [
+        "aws"
+      ],
+      "title": "CloudProvider",
+      "type": "string"
+    },
+    "NmapRawResult": {
+      "additionalProperties": false,
+      "description": "Raw Nmap discovery XML plus optional enrichment XML.",
+      "properties": {
+        "bucket": {
+          "maxLength": 255,
+          "minLength": 3,
+          "title": "Bucket",
+          "type": "string"
+        },
+        "enrichment": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RawArtifactReference"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "format": {
+          "const": "nmap-xml",
+          "title": "Format",
+          "type": "string"
+        },
+        "key": {
+          "maxLength": 1024,
+          "minLength": 1,
+          "title": "Key",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "bucket",
+        "key",
+        "sha256",
+        "format",
+        "enrichment"
+      ],
+      "title": "NmapRawResult",
+      "type": "object"
+    },
+    "RawArtifactReference": {
+      "additionalProperties": false,
+      "description": "Immutable S3 reference and digest for one raw scanner artifact.",
+      "properties": {
+        "bucket": {
+          "maxLength": 255,
+          "minLength": 3,
+          "title": "Bucket",
+          "type": "string"
+        },
+        "key": {
+          "maxLength": 1024,
+          "minLength": 1,
+          "title": "Key",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "bucket",
+        "key",
+        "sha256"
+      ],
+      "title": "RawArtifactReference",
+      "type": "object"
+    },
+    "ScanCommand": {
+      "additionalProperties": false,
+      "description": "Bounded, redacted metadata for one Nmap invocation.",
+      "properties": {
+        "argv": {
+          "items": {
+            "maxLength": 2048,
+            "minLength": 1,
+            "type": "string"
+          },
+          "maxItems": 256,
+          "minItems": 1,
+          "title": "Argv",
+          "type": "array"
+        },
+        "exit_code": {
+          "anyOf": [
+            {
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Exit Code"
+        },
+        "timeout_seconds": {
+          "maximum": 86400,
+          "minimum": 1,
+          "title": "Timeout Seconds",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "argv",
+        "timeout_seconds",
+        "exit_code"
+      ],
+      "title": "ScanCommand",
+      "type": "object"
+    },
+    "ScanCommands": {
+      "additionalProperties": false,
+      "description": "Discovery and optional enrichment command metadata.",
+      "properties": {
+        "discovery": {
+          "$ref": "#/$defs/ScanCommand"
+        },
+        "enrichment": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ScanCommand"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "required": [
+        "discovery",
+        "enrichment"
+      ],
+      "title": "ScanCommands",
+      "type": "object"
+    },
+    "ScanCoverage": {
+      "additionalProperties": false,
+      "description": "Canonical TCP port coverage declared by the scanner.",
+      "properties": {
+        "complete": {
+          "title": "Complete",
+          "type": "boolean"
+        },
+        "ports": {
+          "items": {
+            "maxLength": 11,
+            "minLength": 1,
+            "pattern": "^[0-9]{1,5}(?:-[0-9]{1,5})?$",
+            "type": "string"
+          },
+          "maxItems": 256,
+          "minItems": 1,
+          "title": "Ports",
+          "type": "array"
+        },
+        "protocol": {
+          "const": "tcp",
+          "title": "Protocol",
+          "type": "string"
+        }
+      },
+      "required": [
+        "protocol",
+        "ports",
+        "complete"
+      ],
+      "title": "ScanCoverage",
+      "type": "object"
+    },
+    "ScanError": {
+      "additionalProperties": false,
+      "description": "Bounded scanner failure safe to publish with an envelope.",
+      "properties": {
+        "message": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Message",
+          "type": "string"
+        },
+        "retryable": {
+          "title": "Retryable",
+          "type": "boolean"
+        },
+        "type": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._=-]{0,127}$",
+          "title": "Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type",
+        "message",
+        "retryable"
+      ],
+      "title": "ScanError",
+      "type": "object"
+    },
+    "ScanOutcome": {
+      "description": "Terminal outcome for a scan attempt.",
+      "enum": [
+        "complete",
+        "partial",
+        "failed",
+        "cancelled",
+        "freshness_rejected"
+      ],
+      "title": "ScanOutcome",
+      "type": "string"
+    },
+    "ScanProfile": {
+      "description": "Scanner behavior requested by a directive.",
+      "enum": [
+        "fast-full-tcp",
+        "targeted-tcp",
+        "deep"
+      ],
+      "title": "ScanProfile",
+      "type": "string"
+    },
+    "ScanResult": {
+      "additionalProperties": false,
+      "description": "Normalized evidence record nested inside a published ScanResultEnvelope.",
+      "properties": {
+        "completed_at": {
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,6})?Z$",
+          "title": "Completed At",
+          "type": "string"
+        },
+        "directive_id": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Directive Id",
+          "type": "string"
+        },
+        "error_code": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Error Code"
+        },
+        "error_message": {
+          "anyOf": [
+            {
+              "maxLength": 256,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Error Message"
+        },
+        "event_id": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Event Id",
+          "type": "string"
+        },
+        "exit_code": {
+          "anyOf": [
+            {
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Exit Code"
+        },
+        "open_tcp_ports": {
+          "items": {
+            "maximum": 65535,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "maxItems": 65535,
+          "title": "Open Tcp Ports",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "outcome": {
+          "$ref": "#/$defs/ScanOutcome"
+        },
+        "profile": {
+          "$ref": "#/$defs/ScanProfile"
+        },
+        "raw_result_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Raw Result Sha256"
+        },
+        "requested_tcp_port_ranges": {
+          "items": {
+            "$ref": "#/$defs/TcpPortRange"
+          },
+          "maxItems": 256,
+          "minItems": 1,
+          "title": "Requested Tcp Port Ranges",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "result_id": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Result Id",
+          "type": "string"
+        },
+        "scanned_tcp_port_ranges": {
+          "items": {
+            "$ref": "#/$defs/TcpPortRange"
+          },
+          "maxItems": 256,
+          "title": "Scanned Tcp Port Ranges",
+          "type": "array",
+          "uniqueItems": true
+        },
+        "scanner": {
+          "$ref": "#/$defs/ScannerEngine"
+        },
+        "scanner_version": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Scanner Version",
+          "type": "string"
+        },
+        "schema_version": {
+          "const": "1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "started_at": {
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,6})?Z$",
+          "title": "Started At",
+          "type": "string"
+        },
+        "target": {
+          "$ref": "#/$defs/Target"
+        }
+      },
+      "required": [
+        "schema_version",
+        "result_id",
+        "event_id",
+        "directive_id",
+        "target",
+        "profile",
+        "scanner",
+        "scanner_version",
+        "started_at",
+        "completed_at",
+        "outcome",
+        "requested_tcp_port_ranges",
+        "scanned_tcp_port_ranges",
+        "open_tcp_ports",
+        "exit_code",
+        "raw_result_sha256",
+        "error_code",
+        "error_message"
+      ],
+      "title": "ScanResult",
+      "type": "object"
+    },
+    "ScanResultTarget": {
+      "additionalProperties": false,
+      "description": "Short target identity repeated on the scanner envelope.",
+      "properties": {
+        "address": {
+          "description": "Public IPv4; RFC 5737 ranges are accepted for examples.",
+          "format": "ipv4",
+          "maxLength": 15,
+          "minLength": 7,
+          "title": "Address",
+          "type": "string"
+        },
+        "generation": {
+          "minimum": 1,
+          "title": "Generation",
+          "type": "integer"
+        },
+        "target_id": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Target Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "target_id",
+        "address",
+        "generation"
+      ],
+      "title": "ScanResultTarget",
+      "type": "object"
+    },
+    "ScanTimestamps": {
+      "additionalProperties": false,
+      "description": "Ordered scanner execution and publication timestamps.",
+      "properties": {
+        "result_uploaded_at": {
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,6})?Z$",
+          "title": "Result Uploaded At",
+          "type": "string"
+        },
+        "scan_completed_at": {
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,6})?Z$",
+          "title": "Scan Completed At",
+          "type": "string"
+        },
+        "scan_started_at": {
+          "format": "date-time",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]{1,6})?Z$",
+          "title": "Scan Started At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "scan_started_at",
+        "scan_completed_at",
+        "result_uploaded_at"
+      ],
+      "title": "ScanTimestamps",
+      "type": "object"
+    },
+    "ScannerEngine": {
+      "description": "Scanner engine that produced a result.",
+      "enum": [
+        "nmap"
+      ],
+      "title": "ScannerEngine",
+      "type": "string"
+    },
+    "Target": {
+      "additionalProperties": false,
+      "description": "Stable resource/private-address identity plus mutable public state.",
+      "properties": {
+        "address_family": {
+          "$ref": "#/$defs/AddressFamily"
+        },
+        "generation": {
+          "minimum": 1,
+          "title": "Generation",
+          "type": "integer"
+        },
+        "location": {
+          "maxLength": 32,
+          "minLength": 9,
+          "pattern": "^[a-z]{2}(?:-[a-z0-9]+)+-[0-9]+$",
+          "title": "Location",
+          "type": "string"
+        },
+        "private_address": {
+          "format": "ipv4",
+          "maxLength": 15,
+          "minLength": 7,
+          "title": "Private Address",
+          "type": "string"
+        },
+        "provider": {
+          "$ref": "#/$defs/CloudProvider"
+        },
+        "public_address": {
+          "description": "Public IPv4; RFC 5737 ranges are accepted for examples.",
+          "format": "ipv4",
+          "maxLength": 15,
+          "minLength": 7,
+          "title": "Public Address",
+          "type": "string"
+        },
+        "resource_id": {
+          "pattern": "^eni-[0-9a-f]{8,32}$",
+          "title": "Resource Id",
+          "type": "string"
+        },
+        "scope_id": {
+          "pattern": "^[0-9]{12}$",
+          "title": "Scope Id",
+          "type": "string"
+        },
+        "target_id": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Target Id",
+          "type": "string"
+        },
+        "transport": {
+          "$ref": "#/$defs/TransportProtocol"
+        }
+      },
+      "required": [
+        "target_id",
+        "provider",
+        "scope_id",
+        "location",
+        "resource_id",
+        "private_address",
+        "public_address",
+        "address_family",
+        "transport",
+        "generation"
+      ],
+      "title": "Target",
+      "type": "object"
+    },
+    "TcpPortRange": {
+      "additionalProperties": false,
+      "description": "Inclusive TCP port range.",
+      "properties": {
+        "end": {
+          "maximum": 65535,
+          "minimum": 1,
+          "title": "End",
+          "type": "integer"
+        },
+        "start": {
+          "maximum": 65535,
+          "minimum": 1,
+          "title": "Start",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "start",
+        "end"
+      ],
+      "title": "TcpPortRange",
+      "type": "object"
+    },
+    "TransportProtocol": {
+      "description": "Transport protocol scanned by the current runtime.",
+      "enum": [
+        "tcp"
+      ],
+      "title": "TransportProtocol",
+      "type": "string"
+    }
+  },
+  "$id": "https://raw.githubusercontent.com/Roblox/portscanner/main/schemas/scan-result.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Authoritative S3 object published by the Nmap scanner.",
+  "properties": {
+    "attempt_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._=-]{0,127}$",
+      "title": "Attempt Id",
+      "type": "string"
+    },
+    "commands": {
+      "$ref": "#/$defs/ScanCommands"
+    },
+    "coverage": {
+      "$ref": "#/$defs/ScanCoverage"
+    },
+    "directive_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Directive Id",
+      "type": "string"
+    },
+    "error": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ScanError"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "event_id": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Event Id",
+      "type": "string"
+    },
+    "exit_code": {
+      "anyOf": [
+        {
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Exit Code"
+    },
+    "image_version": {
+      "maxLength": 256,
+      "minLength": 44,
+      "pattern": "^(?:(?:[^@\\s]+@)?sha256:[0-9a-f]{64}|git:[0-9a-f]{40,64})$",
+      "title": "Image Version",
+      "type": "string"
+    },
+    "outcome": {
+      "enum": [
+        "complete",
+        "partial",
+        "failed"
+      ],
+      "title": "Outcome",
+      "type": "string"
+    },
+    "profile": {
+      "$ref": "#/$defs/ScanProfile"
+    },
+    "raw_result": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/NmapRawResult"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "run_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._=-]{0,127}$",
+      "title": "Run Id",
+      "type": "string"
+    },
+    "scan_result": {
+      "$ref": "#/$defs/ScanResult"
+    },
+    "schema_version": {
+      "const": "1.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "target": {
+      "$ref": "#/$defs/ScanResultTarget"
+    },
+    "timestamps": {
+      "$ref": "#/$defs/ScanTimestamps"
+    },
+    "trace_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._=-]{0,127}$",
+      "title": "Trace Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "event_id",
+    "directive_id",
+    "trace_id",
+    "run_id",
+    "attempt_id",
+    "target",
+    "profile",
+    "image_version",
+    "coverage",
+    "timestamps",
+    "commands",
+    "outcome",
+    "exit_code",
+    "raw_result",
+    "error",
+    "scan_result"
+  ],
+  "title": "ScanResultEnvelope",
+  "type": "object"
+}

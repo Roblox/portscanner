@@ -1,0 +1,104 @@
+{{/*
+Copyright 2026 Roblox Corporation
+SPDX-License-Identifier: Apache-2.0
+*/}}
+{{- $scannerNodeSelector := list -}}
+{{- range $key, $value := .Values.scanner.nodeSelector -}}
+{{- $scannerNodeSelector = append $scannerNodeSelector (printf "%s=%v" $key $value) -}}
+{{- end -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "portscanner.fullname" . }}-operator
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "portscanner.labels" . | nindent 4 }}
+    app.kubernetes.io/component: operator
+spec:
+  replicas: {{ .Values.operator.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "portscanner.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "portscanner.selectorLabels" . | nindent 8 }}
+        {{- with .Values.operator.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.operator.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "portscanner.operatorServiceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.operator.podSecurityContext | nindent 8 }}
+      containers:
+        - name: manager
+          image: {{ include "portscanner.operatorImage" . | quote }}
+          imagePullPolicy: {{ .Values.operator.image.pullPolicy }}
+          args:
+            - {{ printf "--metrics-bind-address=%s" .Values.operator.metricsBindAddress | quote }}
+            - {{ printf "--health-probe-bind-address=%s" .Values.operator.healthProbeBindAddress | quote }}
+            - {{ printf "--leader-elect=%t" .Values.operator.leaderElection | quote }}
+            - {{ printf "--leader-election-id=%s" .Values.operator.leaderElectionID | quote }}
+            - {{ printf "--max-concurrent-reconciles=%v" .Values.operator.maxConcurrentReconciles | quote }}
+            - {{ printf "--scanner-image=%s" (include "portscanner.scannerImage" .) | quote }}
+            - {{ printf "--scanner-image-pull-policy=%s" .Values.scanner.image.pullPolicy | quote }}
+            - {{ printf "--scanner-service-account=%s" (include "portscanner.scannerServiceAccountName" .) | quote }}
+            - {{ printf "--scanner-allowed-cidrs-json=%s" (toJson .Values.scanner.authorization.allowedCidrs) | quote }}
+            - {{ printf "--scanner-denied-cidrs-json=%s" (toJson .Values.scanner.authorization.deniedCidrs) | quote }}
+            - {{ printf "--result-bucket=%s" (required "scanner.result.bucket is required" .Values.scanner.result.bucket) | quote }}
+            - {{ printf "--result-prefix=%s" (required "scanner.result.prefix is required" .Values.scanner.result.prefix) | quote }}
+            - {{ printf "--high-priority-class=%s" .Values.priorityClasses.high.name | quote }}
+            - {{ printf "--normal-priority-class=%s" .Values.priorityClasses.normal.name | quote }}
+            - {{ printf "--high-priority-threshold=%v" .Values.scanner.priority.highThreshold | quote }}
+            - {{ printf "--scanner-cpu-request=%s" (index .Values.scanner.resources.requests "cpu") | quote }}
+            - {{ printf "--scanner-cpu-limit=%s" (index .Values.scanner.resources.limits "cpu") | quote }}
+            - {{ printf "--scanner-memory-request=%s" (index .Values.scanner.resources.requests "memory") | quote }}
+            - {{ printf "--scanner-memory-limit=%s" (index .Values.scanner.resources.limits "memory") | quote }}
+            - {{ printf "--scanner-ephemeral-storage-request=%s" (index .Values.scanner.resources.requests "ephemeral-storage") | quote }}
+            - {{ printf "--scanner-ephemeral-storage-limit=%s" (index .Values.scanner.resources.limits "ephemeral-storage") | quote }}
+            - {{ printf "--scanner-tmp-size-limit=%s" .Values.scanner.tmpSizeLimit | quote }}
+            - {{ printf "--scanner-node-selector=%s" (join "," $scannerNodeSelector) | quote }}
+            - {{ printf "--scanner-tolerations-json=%s" (toJson .Values.scanner.tolerations) | quote }}
+          ports:
+            - name: metrics
+              containerPort: {{ .Values.operator.metricsPort }}
+              protocol: TCP
+            - name: health
+              containerPort: {{ .Values.operator.healthProbePort }}
+              protocol: TCP
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+          resources:
+            {{- toYaml .Values.operator.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.operator.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      terminationGracePeriodSeconds: 10
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: {{ .Values.operator.tmpSizeLimit }}
+      {{- with .Values.operator.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.operator.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.operator.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

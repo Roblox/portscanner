@@ -1,0 +1,63 @@
+{
+  "schema_version": "1.0",
+  "event_id": "e1b30194de874dbf73b9cb149f3010ee96b485482643b4180685a5016374e497",
+  "event_type": "target.removed",
+  "target": {
+    "target_id": "d85c41bee53f4d1b42c365ccfdb73aa611974df08171aa3727b296e3bcab737a",
+    "provider": "aws",
+    "scope_id": "123456789012",
+    "location": "us-west-2",
+    "resource_id": "eni-0123456789abcdef0",
+    "private_address": "10.24.8.17",
+    "public_address": "192.0.2.44",
+    "address_family": "ipv4",
+    "transport": "tcp",
+    "generation": 4
+  },
+  "source": {
+    "observation_id": "59ac76b90dbe2a5fc94e45cbcc1b9ab60d0e938f1ad00f390fd6cb5cf2dc9251",
+    "source_event_name": "AwsConfigSnapshot",
+    "source_event_id": "synthetic-event-removal-0001",
+    "source_request_id": "synthetic-request-removal-0001",
+    "event_time": "2026-01-15T11:00:00Z",
+    "observed_at": "2026-01-15T11:00:00Z",
+    "collected_at": "2026-01-15T11:00:00Z"
+  },
+  "aws_context": {
+    "account_id": "123456789012",
+    "region": "us-west-2",
+    "network_interface_id": "eni-0123456789abcdef0",
+    "private_ip": "10.24.8.17",
+    "public_ip": "192.0.2.44",
+    "instance_id": "i-0123456789abcdef0",
+    "security_group_ids": [
+      "sg-0123456789abcdef0",
+      "sg-0fedcba9876543210"
+    ],
+    "policy_fingerprint": "af099ce21f0ca8554c005fb1cde27110ee37ee5a699e0cbc6fd507d1ef4a75c6",
+    "candidate_tcp_port_ranges": [
+      {
+        "start": 22,
+        "end": 22
+      },
+      {
+        "start": 443,
+        "end": 443
+      },
+      {
+        "start": 8443,
+        "end": 8443
+      }
+    ],
+    "source_event_name": "AwsConfigSnapshot",
+    "source_event_id": "synthetic-event-removal-0001",
+    "source_request_id": "synthetic-request-removal-0001",
+    "tags": {
+      "application": "example-web",
+      "environment": "test",
+      "name": "synthetic-target",
+      "service": "example-api"
+    }
+  },
+  "removed_at": "2026-01-15T11:00:00Z"
+}

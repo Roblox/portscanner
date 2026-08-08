@@ -1,0 +1,94 @@
+# SPDX-FileCopyrightText: 2026 Portscanner contributors
+# SPDX-License-Identifier: MIT
+
+name: Supply chain and publication
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: supply-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sanitizer:
+    name: Publication sanitizer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Run sanitizer unit tests
+        run: python -m unittest discover -s tools/tests -p 'test_*.py' -v
+
+      - name: Scan tracked publication content
+        run: python tools/sanitize.py
+
+  pre-commit:
+    name: Pre-commit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Run all hooks
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install pre-commit
+          pre-commit run --all-files --show-diff-on-failure
+
+  gitleaks:
+    name: Gitleaks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Scan Git history and changes
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --volume "${GITHUB_WORKSPACE}:/repo" \
+            --workdir /repo \
+            ghcr.io/gitleaks/gitleaks:v8.30.1 \
+            git --config .gitleaks.toml --redact --no-banner
+
+  license:
+    name: License and REUSE
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Verify license file
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -s LICENSE
+
+      - name: Run REUSE lint
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install 'reuse[charset-normalizer]'
+          reuse lint
