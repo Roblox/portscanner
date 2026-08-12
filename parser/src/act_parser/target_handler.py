@@ -447,6 +447,7 @@ def lambda_handler(event: Mapping[str, Any], _context: Any) -> dict[str, Any]:
                 "target event rejected message_id=%s reason=permanent_validation",
                 message_id,
             )
+            failures.append({"itemIdentifier": message_id})
         except Exception:
             LOGGER.exception(
                 "target event deferred message_id=%s reason=retryable_processing",

@@ -12,7 +12,14 @@ role grants and secret publication.
 Lambda and CLI invocations require the expected `migration_checksum` (or
 `--migration-checksum`). The migrator recomputes the ordered, length-prefixed artifact
 hash before connecting to PostgreSQL and rejects mismatches or symlinked migration
-files.
+files. The artifact set must contain only contiguous, paired migrations beginning at
+`000001`; unpaired files, version gaps, directories, and unrelated files are rejected
+before hashing.
+
+The `portscanner-migrator` wheel embeds the same canonical SQL files from
+`db/migrations`, so a clean `act-migrate` installation has a safe default payload.
+`MIGRATIONS_PATH` or `--migrations` may select a separately reviewed artifact set; the
+checksum remains mandatory.
 
 An `up` invocation targeted below migration `000004` applies the requested schema prefix
 but deliberately skips application credential provisioning because the earlier object

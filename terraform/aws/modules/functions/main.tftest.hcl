@@ -67,6 +67,8 @@ variables {
   snapshot_account_id             = "123456789012"
   snapshot_regions                = ["us-east-1"]
   allowed_tag_keys                = ["application"]
+  allowed_target_cidrs            = ["203.0.113.10/32"]
+  denied_target_cidrs             = ["198.51.100.0/24"]
   authorized_account_ids          = ["123456789012"]
   eks_cluster_name                = "test-eks"
   eks_namespace                   = "portscanner"
@@ -83,5 +85,110 @@ run "migration_invocation_carries_expected_checksum" {
       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
     )
     error_message = "The migration invocation must carry the exact checksum used as its trigger."
+  }
+
+  assert {
+    condition = (
+      alltrue([
+        for mapping in values(aws_lambda_event_source_mapping.sqs) :
+        length(mapping.filter_criteria) == 0
+      ]) &&
+      jsondecode(
+        one(one(aws_lambda_event_source_mapping.outbox[0].filter_criteria).filter).pattern
+      ).eventName == ["INSERT"]
+    )
+    error_message = "Only the DynamoDB outbox mapping may carry the outbox stream filter."
+  }
+}
+
+run "canary_enables_pipeline_without_automatic_inventory" {
+  command = plan
+
+  variables {
+    enable_event_dispatch      = true
+    enable_automatic_inventory = false
+    canary_mode                = true
+  }
+
+  assert {
+    condition = (
+      alltrue([
+        for name, mapping in aws_lambda_event_source_mapping.sqs :
+        mapping.enabled == !contains(["signals", "generator_coverage"], name)
+      ]) &&
+      aws_lambda_event_source_mapping.outbox[0].enabled &&
+      alltrue([
+        for name, rule in aws_cloudwatch_event_rule.schedule :
+        rule.state == (name == "outbox-replay" ? "ENABLED" : "DISABLED")
+      ])
+    )
+    error_message = "Canary dispatch must enable durable outbox replay while keeping automatic inventory schedules disabled."
+  }
+
+  assert {
+    condition = (
+      aws_lambda_function.this["snapshot"].environment[0].variables["CANARY_MODE"] == "true" &&
+      aws_lambda_function.this["snapshot"].environment[0].variables["AUTHORIZED_ACCOUNT_IDS"] == "123456789012" &&
+      aws_lambda_function.this["snapshot"].environment[0].variables["AWS_REGIONS"] == "us-east-1" &&
+      aws_lambda_function.this["generator_priority"].environment[0].variables["ALLOWED_TARGET_CIDRS"] == "203.0.113.10/32" &&
+      aws_lambda_function.this["generator_priority"].environment[0].variables["DENIED_TARGET_CIDRS"] == "198.51.100.0/24"
+    )
+    error_message = "Snapshot and generator runtimes must receive fail-closed account, Region, and CIDR scope."
+  }
+}
+
+run "paused_canary_retains_runtime_guard_with_dispatch_disabled" {
+  command = plan
+
+  variables {
+    enable_event_dispatch      = false
+    enable_automatic_inventory = false
+    canary_mode                = true
+  }
+
+  assert {
+    condition = (
+      aws_lambda_function.this["snapshot"].environment[0].variables["CANARY_MODE"] == "true" &&
+      alltrue([
+        for mapping in aws_lambda_event_source_mapping.sqs :
+        mapping.enabled == false
+      ]) &&
+      aws_lambda_event_source_mapping.outbox[0].enabled == false
+    )
+    error_message = "Paused canary mode must retain its runtime guard while every dispatch mapping is disabled."
+  }
+}
+
+run "automatic_inventory_requires_dispatch_pipeline" {
+  command = plan
+
+  variables {
+    enable_event_dispatch      = false
+    enable_automatic_inventory = true
+  }
+
+  expect_failures = [terraform_data.runtime_validation]
+}
+
+run "activation_enables_recurring_schedules" {
+  command = plan
+
+  variables {
+    enable_event_dispatch      = true
+    enable_automatic_inventory = true
+  }
+
+  assert {
+    condition = (
+      alltrue([
+        for rule in aws_cloudwatch_event_rule.schedule :
+        rule.state == "ENABLED"
+      ]) &&
+      alltrue([
+        for mapping in aws_lambda_event_source_mapping.sqs :
+        mapping.enabled
+      ])
+    )
+    error_message = "Full activation must enable every recurring schedule."
   }
 }

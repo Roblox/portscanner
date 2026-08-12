@@ -84,7 +84,7 @@ def test_requires_exact_notification_bucket_and_decodes_key() -> None:
         )
 
 
-def test_lambda_returns_only_retryable_batch_failures(
+def test_lambda_redrives_retryable_and_permanent_batch_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     settings = Settings(
@@ -121,7 +121,10 @@ def test_lambda_returns_only_retryable_batch_failures(
     }
 
     assert handler.lambda_handler(event, None) == {
-        "batchItemFailures": [{"itemIdentifier": "retry-message"}]
+        "batchItemFailures": [
+            {"itemIdentifier": "retry-message"},
+            {"itemIdentifier": "reject-message"},
+        ]
     }
 
 
@@ -156,7 +159,9 @@ def test_one_permanent_object_does_not_block_later_objects(
         ]
     }
 
-    assert handler.lambda_handler(event, None) == {"batchItemFailures": []}
+    assert handler.lambda_handler(event, None) == {
+        "batchItemFailures": [{"itemIdentifier": "multi-message"}]
+    }
     assert processed == ["reject.json", "success.json"]
 
 
@@ -189,7 +194,9 @@ def test_one_malformed_notification_object_does_not_block_later_objects(
         ]
     }
 
-    assert handler.lambda_handler(event, None) == {"batchItemFailures": []}
+    assert handler.lambda_handler(event, None) == {
+        "batchItemFailures": [{"itemIdentifier": "multi-message"}]
+    }
     assert processed == ["success.json"]
 
 

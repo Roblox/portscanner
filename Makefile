@@ -3,6 +3,10 @@
 
 UV ?= uv
 PYTHON ?= python3
+HELM ?= helm
+KUBECTL ?= kubectl
+KUBECONFORM ?= kubeconform
+PORTSCANNER_TEST_PYTHON ?= $(CURDIR)/.venv/bin/python
 
 BASE_PYTHON_PATHS := contracts examples schemas tools
 OPTIONAL_PYTHON_COMPONENTS := \
@@ -25,9 +29,11 @@ RUNTIME_REQUIREMENTS := \
 
 .PHONY: \
 	sync format format-check lint typecheck test test-contracts \
+	test-postgresql test-packaging \
 	generate generate-runtime-requirements check-generated lock-check \
-	licenses check test-go vet-go sanitize \
-	secret-scan terraform-validate kubernetes-validate containers ci
+	licenses check test-go test-go-envtest vet-go sanitize \
+	secret-scan terraform-script-tests terraform-validate \
+	kubernetes-validate containers ci
 
 sync:
 	$(UV) sync --frozen --all-packages --group dev
@@ -55,6 +61,12 @@ test:
 test-contracts:
 	$(UV) run --package portscanner-contracts pytest contracts/tests
 
+test-postgresql:
+	./tools/test_postgresql.sh
+
+test-packaging:
+	bash ./tools/test_migrator_package.sh
+
 generate: generate-runtime-requirements
 	$(UV) run --frozen --package portscanner-contracts python schemas/generate.py
 	$(UV) run --frozen --package portscanner-contracts python examples/generate.py
@@ -72,10 +84,13 @@ lock-check:
 licenses:
 	$(UV) run reuse lint
 
-check: lock-check format-check lint typecheck test check-generated licenses
+check: lock-check format-check lint typecheck test test-packaging check-generated licenses
 
 test-go:
-	cd operator && go test ./...
+	cd operator && PORTSCANNER_TEST_PYTHON="$(PORTSCANNER_TEST_PYTHON)" go test ./...
+
+test-go-envtest:
+	PORTSCANNER_TEST_PYTHON="$(PORTSCANNER_TEST_PYTHON)" $(MAKE) -C operator test-envtest
 
 vet-go:
 	cd operator && go vet ./...
@@ -86,11 +101,59 @@ sanitize:
 secret-scan:
 	gitleaks dir --redact --config .gitleaks.toml .
 
+terraform-script-tests:
+	./terraform/aws/scripts/tests/deploy-test.sh
+	./terraform/aws/scripts/tests/emergency-pause-test.sh
+	./terraform/aws/scripts/tests/build-images-test.sh
+
 terraform-validate:
 	./terraform/aws/scripts/validate.sh
 
 kubernetes-validate:
-	kubectl kustomize operator/config/default >/dev/null
+	@set -eu; \
+	work_dir="$$(mktemp -d "$${TMPDIR:-/tmp}/portscanner-kubernetes.XXXXXX")"; \
+	trap 'rm -rf "$$work_dir"' EXIT; \
+	schema_dir="$$work_dir/schemas"; \
+	$(UV) run --frozen --package portscanner-generator \
+		python tools/export_crd_schemas.py \
+		--output-directory "$$schema_dir" \
+		$$(git ls-files 'operator/config/crd/bases/*.yaml'); \
+	count=0; \
+	for file in $$(git ls-files 'kustomization.yaml' '**/kustomization.yaml'); do \
+		rendered="$$work_dir/kustomize-$$count.yaml"; \
+		$(KUBECTL) kustomize "$$(dirname "$$file")" >"$$rendered"; \
+		for version in 1.35.0 1.36.0; do \
+			$(KUBECONFORM) -strict -summary -skip CustomResourceDefinition \
+				-kubernetes-version "$$version" \
+				-schema-location default \
+				-schema-location "$$schema_dir/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" \
+				"$$rendered"; \
+		done; \
+		count=$$((count + 1)); \
+	done; \
+	for sample in $$(git ls-files 'operator/config/samples/*.yaml'); do \
+		for version in 1.35.0 1.36.0; do \
+			$(KUBECONFORM) -strict -summary \
+				-kubernetes-version "$$version" \
+				-schema-location default \
+				-schema-location "$$schema_dir/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" \
+				"$$sample"; \
+		done; \
+	done; \
+	for chart in $$(git ls-files 'Chart.yaml' '**/Chart.yaml'); do \
+		for version in 1.35.0 1.36.0; do \
+			$(HELM) lint "$$(dirname "$$chart")" --kube-version "$$version" >/dev/null; \
+			rendered="$$work_dir/helm-$$count-$$version.yaml"; \
+			$(HELM) template portscanner-ci "$$(dirname "$$chart")" \
+				--include-crds --kube-version "$$version" >"$$rendered"; \
+			$(KUBECONFORM) -strict -summary -skip CustomResourceDefinition \
+				-kubernetes-version "$$version" \
+				-schema-location default \
+				-schema-location "$$schema_dir/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" \
+				"$$rendered"; \
+		done; \
+		count=$$((count + 1)); \
+	done
 
 containers:
 	$(PYTHON) tools/build_tracked_image.py --dockerfile inventory/Dockerfile --tag portscanner-inventory:test
@@ -101,4 +164,4 @@ containers:
 	$(PYTHON) tools/build_tracked_image.py --dockerfile scanner/nmap/Dockerfile --tag portscanner-scanner:test
 	$(PYTHON) tools/build_tracked_image.py --dockerfile operator/Dockerfile --context operator --tag portscanner-operator:test
 
-ci: check test-go vet-go sanitize terraform-validate kubernetes-validate
+ci: check test-postgresql test-go test-go-envtest vet-go sanitize terraform-script-tests terraform-validate kubernetes-validate

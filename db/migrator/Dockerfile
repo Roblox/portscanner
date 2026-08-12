@@ -17,12 +17,10 @@ RUN python -m pip install \
     --requirement /opt/portscanner/requirements-runtime.txt
 
 COPY db/migrator /tmp/portscanner-migrator
+COPY db/migrations /tmp/portscanner-migrator/migrations
 RUN python -m pip install --no-cache-dir --no-build-isolation --no-deps /tmp/portscanner-migrator \
     && rm -rf /tmp/portscanner-migrator
 RUN python -m pip uninstall --yes hatchling setuptools trove-classifiers pathspec packaging pluggy
-
-COPY db/migrations /opt/act/migrations
-ENV MIGRATIONS_PATH=/opt/act/migrations
 
 COPY LICENSE NOTICE THIRD_PARTY_NOTICES.md /licenses/
 

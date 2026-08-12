@@ -18,6 +18,7 @@ from portscanner_inventory.events import (
     event_json,
     snapshot_source,
 )
+from portscanner_inventory.handlers.outbox import _Runtime as OutboxRuntime
 from portscanner_inventory.handlers.outbox import dispatch_record
 from portscanner_inventory.handlers.outbox import lambda_handler as outbox_lambda
 from portscanner_inventory.handlers.rescan import emit_coverage, schedule_bucket
@@ -176,11 +177,14 @@ def _outbox_record(event: Any, *, record_id: str = "stream-record") -> dict[str,
         "dynamodb": {
             "SequenceNumber": record_id,
             "NewImage": {
+                "pk": {"S": f"OUTBOX#{event.event_id}"},
+                "sk": {"S": "EVENT"},
                 "entity": {"S": "outbox"},
                 "event_id": {"S": event.event_id},
                 "event_json": {"S": event_json(event)},
                 "account_id": {"S": event.aws_context.account_id},
                 "region": {"S": event.aws_context.region},
+                "delivery_ttl_seconds": {"N": "604800"},
             },
         },
     }
@@ -255,6 +259,9 @@ def test_outbox_dispatch_persists_hash_and_sends_s3_notifications() -> None:
     )
     assert result.event is not None
     outbox = next(item for (pk, _sk), item in dynamo.items.items() if pk.startswith("OUTBOX#"))
+    assert outbox["entity"] == {"S": "outbox"}
+    assert "expires_at" not in outbox
+    assert outbox["delivery_ttl_seconds"] == {"N": "604800"}
     record = {
         "eventName": "INSERT",
         "dynamodb": {"NewImage": outbox},
@@ -288,6 +295,116 @@ def test_outbox_dispatch_persists_hash_and_sends_s3_notifications() -> None:
     notification = json.loads(sqs.requests[0]["MessageBody"])
     assert "schema_version" not in notification
     assert "aws_context" not in notification
+
+
+def test_outbox_replay_dispatches_pending_row_and_marks_delivery() -> None:
+    event = _work_event(ScanReason.NEW_TARGET)
+    image = _outbox_record(event)["dynamodb"]["NewImage"]
+
+    class Dynamo:
+        def __init__(self) -> None:
+            self.queries: list[dict[str, Any]] = []
+            self.updates: list[dict[str, Any]] = []
+
+        def query(self, **request: Any) -> dict[str, Any]:
+            self.queries.append(request)
+            return {"Items": [image]}
+
+        def update_item(self, **request: Any) -> dict[str, Any]:
+            self.updates.append(request)
+            return {}
+
+    settings = Settings(
+        state_table="inventory",
+        event_bucket="events",
+        priority_queue_url=PRIORITY_QUEUE_URL,
+        coverage_queue_url=COVERAGE_QUEUE_URL,
+        target_event_queue_url=TARGET_EVENT_QUEUE_URL,
+    )
+    runtime = object.__new__(OutboxRuntime)
+    runtime.settings = settings
+    runtime.s3 = S3()
+    runtime.sqs = SQS()
+    runtime.dynamodb = Dynamo()
+
+    assert outbox_lambda({"mode": "replay-outbox"}, None, runtime=runtime) == {
+        "processed": 1,
+        "failures": 0,
+    }
+    assert runtime.dynamodb.queries[0]["IndexName"] == "entity-event-index"
+    assert runtime.dynamodb.queries[0]["Limit"] == 100
+    assert [request["QueueUrl"] for request in runtime.sqs.requests] == [
+        TARGET_EVENT_QUEUE_URL,
+        PRIORITY_QUEUE_URL,
+    ]
+    update = runtime.dynamodb.updates[0]
+    assert update["Key"] == {
+        "pk": {"S": f"OUTBOX#{event.event_id}"},
+        "sk": {"S": "EVENT"},
+    }
+    assert update["ExpressionAttributeValues"][":delivered"] == {"S": "outbox-delivered"}
+    assert int(update["ExpressionAttributeValues"][":expires"]["N"]) > int(NOW.timestamp())
+
+
+def test_outbox_legacy_pending_row_uses_safe_retention_before_sending() -> None:
+    event = _work_event(ScanReason.NEW_TARGET)
+    record = _outbox_record(event)
+    image = record["dynamodb"]["NewImage"]
+    del image["delivery_ttl_seconds"]
+    image["expires_at"] = {"N": str(int(NOW.timestamp()) + 60)}
+
+    class Dynamo:
+        def __init__(self) -> None:
+            self.updates: list[dict[str, Any]] = []
+
+        def update_item(self, **request: Any) -> dict[str, Any]:
+            self.updates.append(request)
+            return {}
+
+    dynamodb = Dynamo()
+    s3 = S3()
+    sqs = SQS()
+    assert dispatch_record(
+        record,
+        s3,
+        sqs,
+        bucket="events",
+        priority_queue_url=PRIORITY_QUEUE_URL,
+        coverage_queue_url=COVERAGE_QUEUE_URL,
+        target_event_queue_url=TARGET_EVENT_QUEUE_URL,
+        dynamodb_client=dynamodb,
+        table_name="inventory",
+        delivered_at=NOW,
+    )
+
+    assert len(sqs.requests) == 2
+    assert dynamodb.updates[0]["ExpressionAttributeValues"][":expires"] == {
+        "N": str(int(NOW.timestamp()) + 604_800)
+    }
+
+
+def test_outbox_invalid_tracking_fails_before_s3_or_sqs_side_effects() -> None:
+    event = _work_event(ScanReason.NEW_TARGET)
+    record = _outbox_record(event)
+    record["dynamodb"]["NewImage"]["delivery_ttl_seconds"] = {"N": "invalid"}
+    s3 = S3()
+    sqs = SQS()
+
+    with pytest.raises(ValueError, match="delivery retention"):
+        dispatch_record(
+            record,
+            s3,
+            sqs,
+            bucket="events",
+            priority_queue_url=PRIORITY_QUEUE_URL,
+            coverage_queue_url=COVERAGE_QUEUE_URL,
+            target_event_queue_url=TARGET_EVENT_QUEUE_URL,
+            dynamodb_client=object(),
+            table_name="inventory",
+        )
+
+    assert s3.requests == []
+    assert sqs.requests == []
 
 
 @pytest.mark.parametrize(
@@ -379,6 +496,45 @@ def test_outbox_settings_require_all_exact_queue_environment_variables() -> None
     missing = Settings(state_table="inventory", event_bucket="events")
     with pytest.raises(ValueError, match=r"PRIORITY_QUEUE_URL.*COVERAGE_QUEUE_URL"):
         missing.validate_outbox()
+
+
+def test_snapshot_settings_parse_and_validate_runtime_boundaries() -> None:
+    settings = Settings.from_env(
+        {
+            "INVENTORY_TABLE": "inventory",
+            "TARGET_EVENT_BUCKET": "events",
+            "SNAPSHOT_BACKEND": "ec2",
+            "AWS_ACCOUNT_ID": "123456789012",
+            "AUTHORIZED_ACCOUNT_IDS": "222222222222,123456789012",
+            "AWS_REGIONS": "us-west-2,us-east-1",
+            "CANARY_MODE": "true",
+        }
+    )
+
+    settings.validate_snapshot()
+    assert settings.authorized_account_ids == ("123456789012", "222222222222")
+    assert settings.regions == ("us-east-1", "us-west-2")
+    assert settings.canary_mode is True
+
+    member_only = Settings(
+        state_table="inventory",
+        event_bucket="events",
+        snapshot_backend="config",
+        config_aggregator_name="member-sources",
+        account_id="123456789012",
+        authorized_account_ids=("222222222222",),
+        regions=("us-east-1",),
+    )
+    member_only.validate_snapshot()
+
+    with pytest.raises(ValueError, match="must be true or false"):
+        Settings.from_env(
+            {
+                "INVENTORY_TABLE": "inventory",
+                "TARGET_EVENT_BUCKET": "events",
+                "CANARY_MODE": "yes",
+            }
+        )
 
 
 def test_rescan_bucket_and_events_are_deterministic() -> None:

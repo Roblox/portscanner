@@ -114,6 +114,29 @@ variable "additional_api_client_security_group_ids" {
   default     = []
 }
 
+variable "endpoint_public_access" {
+  description = "Opt in to the EKS public API endpoint for a restricted evaluation runner. Private access remains enabled."
+  type        = bool
+  default     = false
+}
+
+variable "public_access_cidrs" {
+  description = "Canonical IPv4 CIDRs allowed to reach an explicitly enabled public EKS API endpoint. An unrestricted CIDR is rejected."
+  type        = set(string)
+  default     = []
+
+  validation {
+    condition = alltrue([
+      for cidr in var.public_access_cidrs :
+      cidr != "0.0.0.0/0" &&
+      can(regex("^(0|[1-9][0-9]{0,2})(\\.(0|[1-9][0-9]{0,2})){3}/([0-9]|[12][0-9]|3[0-2])$", cidr)) &&
+      can(cidrnetmask(cidr)) &&
+      try(cidrhost(cidr, 0) == split("/", cidr)[0], false)
+    ])
+    error_message = "public_access_cidrs must contain restricted canonical IPv4 prefixes; 0.0.0.0/0 is forbidden."
+  }
+}
+
 variable "existing_interface_endpoint_security_group_ids" {
   description = "Validated existing interface endpoint security groups that receive TCP/443 ingress from the EKS cluster security group."
   type        = set(string)
@@ -174,6 +197,61 @@ variable "denied_target_cidrs" {
       try(cidrhost(cidr, 0) == split("/", cidr)[0], false)
     ])
     error_message = "denied_target_cidrs must contain only canonical IPv4 network prefixes."
+  }
+}
+
+variable "operator_max_concurrent_reconciles" {
+  description = "Maximum concurrent Scanner reconciliations."
+  type        = number
+  default     = 4
+
+  validation {
+    condition     = var.operator_max_concurrent_reconciles >= 1 && var.operator_max_concurrent_reconciles <= 32 && floor(var.operator_max_concurrent_reconciles) == var.operator_max_concurrent_reconciles
+    error_message = "operator_max_concurrent_reconciles must be an integer between 1 and 32."
+  }
+}
+
+variable "scanner_max_concurrent_pods" {
+  description = "Hard ResourceQuota limit for concurrently active scanner Pods."
+  type        = number
+  default     = 4
+
+  validation {
+    condition     = var.scanner_max_concurrent_pods >= 1 && var.scanner_max_concurrent_pods <= 100 && floor(var.scanner_max_concurrent_pods) == var.scanner_max_concurrent_pods
+    error_message = "scanner_max_concurrent_pods must be an integer between 1 and 100."
+  }
+}
+
+variable "scanner_max_jobs" {
+  description = "Hard ResourceQuota limit for active, pending, and retained scanner Jobs."
+  type        = number
+  default     = 16
+
+  validation {
+    condition     = var.scanner_max_jobs >= 1 && var.scanner_max_jobs <= 1000 && floor(var.scanner_max_jobs) == var.scanner_max_jobs
+    error_message = "scanner_max_jobs must be an integer between 1 and 1000."
+  }
+}
+
+variable "scanner_min_rate" {
+  description = "Minimum Nmap probe rate passed to every scanner Job."
+  type        = number
+  default     = 100
+
+  validation {
+    condition     = var.scanner_min_rate >= 1 && var.scanner_min_rate <= 2000 && floor(var.scanner_min_rate) == var.scanner_min_rate
+    error_message = "scanner_min_rate must be an integer between 1 and 2000."
+  }
+}
+
+variable "scanner_max_rate" {
+  description = "Maximum Nmap probe rate passed to every scanner Job."
+  type        = number
+  default     = 500
+
+  validation {
+    condition     = var.scanner_max_rate >= 1 && var.scanner_max_rate <= 5000 && floor(var.scanner_max_rate) == var.scanner_max_rate
+    error_message = "scanner_max_rate must be an integer between 1 and 5000."
   }
 }
 
@@ -272,6 +350,15 @@ resource "terraform_data" "node_validation" {
     }
 
     precondition {
+      condition = (
+        var.endpoint_public_access && length(var.public_access_cidrs) > 0
+        ) || (
+        !var.endpoint_public_access && length(var.public_access_cidrs) == 0
+      )
+      error_message = "Public EKS API access requires at least one restricted CIDR, and public_access_cidrs must be empty when public access is disabled."
+    }
+
+    precondition {
       condition = alltrue([
         for instance_type in values(data.aws_ec2_instance_type.node) :
         contains(instance_type.supported_architectures, var.workload_architecture)
@@ -296,6 +383,16 @@ resource "terraform_data" "operator_validation" {
         length(var.installer_principal_arns) > 0
       )
       error_message = "install_operator requires operator/scanner digests, a completed migration token, and at least one explicit installer principal."
+    }
+
+    precondition {
+      condition     = var.scanner_min_rate <= var.scanner_max_rate
+      error_message = "scanner_min_rate must not exceed scanner_max_rate."
+    }
+
+    precondition {
+      condition     = var.scanner_max_jobs >= var.scanner_max_concurrent_pods
+      error_message = "scanner_max_jobs must be at least scanner_max_concurrent_pods."
     }
 
     precondition {
@@ -374,7 +471,8 @@ resource "aws_eks_cluster" "this" {
   vpc_config {
     subnet_ids              = var.private_subnet_ids
     endpoint_private_access = true
-    endpoint_public_access  = false
+    endpoint_public_access  = var.endpoint_public_access
+    public_access_cidrs     = var.endpoint_public_access ? sort(tolist(var.public_access_cidrs)) : []
   }
 
   depends_on = [
@@ -584,6 +682,7 @@ resource "helm_release" "operator" {
   values = [
     yamlencode({
       operator = {
+        maxConcurrentReconciles = var.operator_max_concurrent_reconciles
         image = {
           repository = var.repository_urls["operator"]
           digest     = var.image_digests["operator"]
@@ -596,6 +695,8 @@ resource "helm_release" "operator" {
         }
       }
       scanner = {
+        maxConcurrentPods = var.scanner_max_concurrent_pods
+        maxJobs           = var.scanner_max_jobs
         image = {
           repository = var.repository_urls["scanner"]
           digest     = var.image_digests["scanner"]
@@ -606,6 +707,10 @@ resource "helm_release" "operator" {
         authorization = {
           allowedCidrs = sort(tolist(var.allowed_target_cidrs))
           deniedCidrs  = sort(tolist(var.denied_target_cidrs))
+        }
+        tuning = {
+          minRate = var.scanner_min_rate
+          maxRate = var.scanner_max_rate
         }
         result = {
           bucket = var.results_bucket_name

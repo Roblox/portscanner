@@ -14,6 +14,16 @@ variable "aws_region" {
   type        = string
 }
 
+variable "expected_deployment_account_id" {
+  description = "Fail-closed AWS account boundary for the state resources."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[0-9]{12}$", var.expected_deployment_account_id))
+    error_message = "expected_deployment_account_id must be a 12-digit AWS account ID."
+  }
+}
+
 variable "name_prefix" {
   description = "Portable prefix for generated state resource names."
   type        = string
@@ -21,7 +31,8 @@ variable "name_prefix" {
 }
 
 provider "aws" {
-  region = var.aws_region
+  region              = var.aws_region
+  allowed_account_ids = [var.expected_deployment_account_id]
 
   default_tags {
     tags = {

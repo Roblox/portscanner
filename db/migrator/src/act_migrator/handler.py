@@ -22,7 +22,16 @@ def default_migrations_path() -> Path:
     configured = os.getenv("MIGRATIONS_PATH")
     if configured:
         return Path(configured)
-    return Path(__file__).resolve().parents[3] / "migrations"
+    module_path = Path(__file__).resolve()
+    packaged = module_path.parent / "migrations"
+    if packaged.is_dir():
+        return packaged
+    repository = module_path.parents[3] / "migrations"
+    if repository.is_dir():
+        return repository
+    raise MigrationError(
+        "migration SQL is missing; reinstall portscanner-migrator or set MIGRATIONS_PATH"
+    )
 
 
 def target_supports_credential_provisioning(target: str | None) -> bool:

@@ -17,12 +17,14 @@ locals {
   ]
   operator_chart_path = abspath("${path.module}/../../../operator/chart/portscanner")
 
-  cloudtrail_arn = var.existing_cloudtrail_arn != null ? var.existing_cloudtrail_arn : (
-    "arn:${data.aws_partition.current.partition}:cloudtrail:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:trail/${local.cloudtrail_name}"
+  cloudtrail_arn = (
+    var.cloudtrail_mode == "create" ?
+    "arn:${data.aws_partition.current.partition}:cloudtrail:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:trail/${local.cloudtrail_name}" :
+    var.cloudtrail_mode == "existing" ? var.existing_cloudtrail_arn : null
   )
 
   signal_rule_arns = compact([
-    "arn:${data.aws_partition.current.partition}:events:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:rule/${local.local_signal_rule}",
+    var.cloudtrail_mode != "disabled" ? "arn:${data.aws_partition.current.partition}:events:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:rule/${local.local_signal_rule}" : null,
     "arn:${data.aws_partition.current.partition}:events:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:rule/${local.local_state_rule}",
     var.create_central_event_bus ? "arn:${data.aws_partition.current.partition}:events:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:rule/${local.central_bus_name}/${local.central_signal_rule}" : null,
     var.create_central_event_bus ? "arn:${data.aws_partition.current.partition}:events:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:rule/${local.central_bus_name}/${local.central_state_rule}" : null
@@ -66,9 +68,21 @@ resource "terraform_data" "deployment_stage_validation" {
         var.deploy_runtime &&
         var.run_migration &&
         length(var.eks_installer_principal_arns) > 0 &&
-        length(var.eks_api_client_security_group_ids) > 0
+        (
+          length(var.eks_api_client_security_group_ids) > 0 ||
+          (var.eks_endpoint_public_access && length(var.eks_public_access_cidrs) > 0)
+        )
       )
-      error_message = "install_operator requires runtime, migration, an explicit EKS installer principal, and an approved private API client security group."
+      error_message = "install_operator requires runtime, migration, an explicit EKS installer principal, and either an approved private API client security group or an explicitly restricted public endpoint."
+    }
+
+    precondition {
+      condition = (
+        var.eks_endpoint_public_access && length(var.eks_public_access_cidrs) > 0
+        ) || (
+        !var.eks_endpoint_public_access && length(var.eks_public_access_cidrs) == 0
+      )
+      error_message = "Public EKS API access requires at least one restricted CIDR, and eks_public_access_cidrs must be empty when public access is disabled."
     }
 
     precondition {
@@ -91,6 +105,24 @@ resource "terraform_data" "deployment_stage_validation" {
       )
       error_message = "Activation requires runtime, migration, operator installation, and explicit authorized_account_ids."
     }
+
+    precondition {
+      condition     = !var.enable_automatic_inventory || var.enable_event_dispatch
+      error_message = "Automatic inventory requires the queue and stream dispatch pipeline."
+    }
+
+    precondition {
+      condition = !var.canary_mode || (
+        var.deploy_runtime &&
+        var.run_migration &&
+        var.install_operator &&
+        !var.enable_automatic_inventory &&
+        length(var.authorized_account_ids) > 0 &&
+        length(var.allowed_target_cidrs) == 1 &&
+        can(regex("/32$", try(one(var.allowed_target_cidrs), "")))
+      )
+      error_message = "canary_mode requires installed migrated runtime, explicit account scope, one exact /32 target allowlist, and automatic inventory disabled."
+    }
   }
 }
 
@@ -107,7 +139,7 @@ resource "terraform_data" "authorized_scope_validation" {
     }
 
     precondition {
-      condition = !var.enable_event_dispatch || var.allowed_organization_id != null || alltrue([
+      condition = !var.enable_automatic_inventory || var.allowed_organization_id != null || alltrue([
         for account_id in var.authorized_account_ids :
         contains(local.bus_authorized_account_ids, account_id)
       ])
@@ -156,8 +188,11 @@ module "network" {
   existing_private_subnet_ids                            = var.existing_private_subnet_ids
   existing_isolated_subnet_ids                           = var.existing_isolated_subnet_ids
   existing_private_subnet_egress_mode                    = var.existing_private_subnet_egress_mode
+  existing_public_nat_gateway_ids                        = var.existing_public_nat_gateway_ids
+  existing_transit_gateway_public_egress_acknowledged    = var.existing_transit_gateway_public_egress_acknowledged
   existing_private_vpc_endpoint_ids                      = var.existing_private_vpc_endpoint_ids
   existing_private_interface_endpoint_security_group_ids = var.existing_private_interface_endpoint_security_group_ids
+  scanner_public_egress_required                         = var.enable_event_dispatch
 }
 
 module "storage" {
@@ -173,7 +208,7 @@ module "storage" {
   bucket_expiration_days            = var.bucket_expiration_days
   force_destroy_buckets             = var.force_destroy_buckets
   dynamodb_point_in_time_recovery   = var.dynamodb_point_in_time_recovery
-  cloudtrail_source_arns            = [local.cloudtrail_arn]
+  cloudtrail_source_arns            = compact([local.cloudtrail_arn])
   enable_config_delivery            = var.config_mode == "create"
   signal_event_rule_arns            = local.signal_rule_arns
 }
@@ -183,6 +218,7 @@ module "repositories" {
 
   name_prefix                    = local.name
   untagged_image_expiration_days = var.ecr_untagged_image_expiration_days
+  force_delete                   = var.force_delete_repositories
 }
 
 module "database" {
@@ -209,10 +245,11 @@ module "signals" {
   name_prefix                     = local.name
   signal_queue_arn                = module.storage.queue_arns["signal"]
   signal_dead_letter_queue_arn    = module.storage.dead_letter_queue_arns["signal"]
-  enable_event_dispatch           = var.enable_event_dispatch
+  enable_event_dispatch           = var.enable_automatic_inventory
   config_mode                     = var.config_mode
   config_delivery_bucket_name     = module.storage.bucket_names["events"]
   existing_config_aggregator_name = var.existing_config_aggregator_name
+  cloudtrail_mode                 = var.cloudtrail_mode
   existing_cloudtrail_arn         = var.existing_cloudtrail_arn
   cloudtrail_name                 = local.cloudtrail_name
   cloudtrail_bucket_name          = module.storage.bucket_names["cloudtrail"]
@@ -247,6 +284,8 @@ module "functions" {
   deploy_runtime                       = var.deploy_runtime
   run_migration                        = var.run_migration
   enable_event_dispatch                = var.enable_event_dispatch
+  enable_automatic_inventory           = var.enable_automatic_inventory
+  canary_mode                          = var.canary_mode
   image_digests                        = var.image_digests
   repository_urls                      = module.repositories.repository_urls
   function_role_arns                   = module.identities.function_role_arns
@@ -267,6 +306,8 @@ module "functions" {
   snapshot_account_id                  = data.aws_caller_identity.current.account_id
   snapshot_regions                     = local.snapshot_regions
   allowed_tag_keys                     = var.allowed_tag_keys
+  allowed_target_cidrs                 = var.allowed_target_cidrs
+  denied_target_cidrs                  = var.denied_target_cidrs
   target_event_prefix                  = "target-events/aws"
   authorized_account_ids               = var.authorized_account_ids
   member_collector_role_arns           = var.member_collector_role_arns
@@ -304,11 +345,18 @@ module "eks" {
   generator_role_arn                             = module.identities.generator_role_arn
   generator_security_group_id                    = module.network.lambda_runtime_security_group_id
   additional_api_client_security_group_ids       = var.eks_api_client_security_group_ids
+  endpoint_public_access                         = var.eks_endpoint_public_access
+  public_access_cidrs                            = var.eks_public_access_cidrs
   existing_interface_endpoint_security_group_ids = module.network.existing_interface_endpoint_security_group_ids
   installer_principal_arns                       = var.eks_installer_principal_arns
   scanner_pod_role_arn                           = module.identities.scanner_pod_role_arn
   allowed_target_cidrs                           = var.allowed_target_cidrs
   denied_target_cidrs                            = var.denied_target_cidrs
+  operator_max_concurrent_reconciles             = var.operator_max_concurrent_reconciles
+  scanner_max_concurrent_pods                    = var.scanner_max_concurrent_pods
+  scanner_max_jobs                               = var.scanner_max_jobs
+  scanner_min_rate                               = var.scanner_min_rate
+  scanner_max_rate                               = var.scanner_max_rate
   namespace                                      = var.eks_namespace
   chart_path                                     = local.operator_chart_path
   install_operator                               = var.install_operator

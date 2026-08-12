@@ -56,7 +56,9 @@ case "${output_name}" in
           "runtime_created":false,
           "migration_run":false,
           "operator_installed":false,
-          "dispatch_enabled":false
+          "dispatch_enabled":false,
+          "automatic_inventory_enabled":false,
+          "canary_mode":false
         }'
         ;;
       active)
@@ -64,7 +66,29 @@ case "${output_name}" in
           "runtime_created":true,
           "migration_run":true,
           "operator_installed":true,
-          "dispatch_enabled":true
+          "dispatch_enabled":true,
+          "automatic_inventory_enabled":true,
+          "canary_mode":false
+        }'
+        ;;
+      canary)
+        printf '%s\n' '{
+          "runtime_created":true,
+          "migration_run":true,
+          "operator_installed":true,
+          "dispatch_enabled":true,
+          "automatic_inventory_enabled":false,
+          "canary_mode":true
+        }'
+        ;;
+      paused-canary)
+        printf '%s\n' '{
+          "runtime_created":true,
+          "migration_run":true,
+          "operator_installed":true,
+          "dispatch_enabled":false,
+          "automatic_inventory_enabled":false,
+          "canary_mode":true
         }'
         ;;
       invalid)
@@ -72,13 +96,32 @@ case "${output_name}" in
           "runtime_created":false,
           "migration_run":false,
           "operator_installed":false,
-          "dispatch_enabled":true
+          "dispatch_enabled":true,
+          "automatic_inventory_enabled":false,
+          "canary_mode":true
+        }'
+        ;;
+      invalid-canary)
+        printf '%s\n' '{
+          "runtime_created":false,
+          "migration_run":false,
+          "operator_installed":false,
+          "dispatch_enabled":false,
+          "automatic_inventory_enabled":false,
+          "canary_mode":true
         }'
         ;;
       *)
         exit 89
         ;;
     esac
+    ;;
+  workload_architecture)
+    if [[ "${FAKE_TF_ARCH:-arm64}" == "x86_64" ]]; then
+      printf '%s\n' '{"architecture":"x86_64","node_ami_type":"AL2023_x86_64_STANDARD","node_instance_types":["t3.medium"]}'
+    else
+      printf '%s\n' '{"architecture":"arm64","node_ami_type":"AL2023_ARM_64_STANDARD","node_instance_types":["t4g.medium"]}'
+    fi
     ;;
   *)
     echo "unexpected terraform invocation" >&2
@@ -151,11 +194,38 @@ UPGRADE_LOG="$(<"${STDERR_FILE}")"
 
 PATH="${FAKE_BIN}:${PATH}" \
   PORTSCANNER_ALLOW_DIRTY=true \
+  FAKE_TF_STATE=canary \
+  "${BUILD_SCRIPT}" --dry-run "${CENTRAL_ROOT}" arm64 >"${STDOUT_FILE}" 2>"${STDERR_FILE}" ||
+  fail "canary deployment upgrade dry run failed"
+CANARY_LOG="$(<"${STDERR_FILE}")"
+[[ "${CANARY_LOG}" == *"(canary)"* ]] ||
+  fail "upgrade dry run omitted canary deployment state"
+
+PATH="${FAKE_BIN}:${PATH}" \
+  PORTSCANNER_ALLOW_DIRTY=true \
+  FAKE_TF_STATE=paused-canary \
+  "${BUILD_SCRIPT}" --dry-run "${CENTRAL_ROOT}" arm64 >"${STDOUT_FILE}" 2>"${STDERR_FILE}" ||
+  fail "paused canary deployment upgrade dry run failed"
+PAUSED_CANARY_LOG="$(<"${STDERR_FILE}")"
+[[ "${PAUSED_CANARY_LOG}" == *"(canary-paused)"* ]] ||
+  fail "upgrade dry run rejected the retained canary boundary"
+
+PATH="${FAKE_BIN}:${PATH}" \
+  PORTSCANNER_ALLOW_DIRTY=true \
+  FAKE_TF_ARCH=x86_64 \
   "${BUILD_SCRIPT}" --dry-run "${TF_ROOT}" x86_64 >"${STDOUT_FILE}" 2>"${STDERR_FILE}"
 [[ ! -s "${STDOUT_FILE}" ]] || fail "x86 dry run wrote digest input to stdout"
 X86_DRY_RUN_LOG="$(<"${STDERR_FILE}")"
 [[ "${X86_DRY_RUN_LOG}" == *"architecture mapping: x86_64 -> linux/amd64"* ]] ||
   fail "x86 dry run omitted architecture mapping"
+
+if PATH="${FAKE_BIN}:${PATH}" PORTSCANNER_ALLOW_DIRTY=true \
+  "${BUILD_SCRIPT}" --dry-run "${TF_ROOT}" x86_64 >"${STDOUT_FILE}" 2>"${STDERR_FILE}"; then
+  fail "image architecture mismatch was accepted"
+fi
+ARCHITECTURE_ERROR="$(<"${STDERR_FILE}")"
+[[ "${ARCHITECTURE_ERROR}" == *"does not match applied workload_architecture"* ]] ||
+  fail "image architecture mismatch was not explicit"
 
 if PATH="${FAKE_BIN}:${PATH}" PORTSCANNER_ALLOW_DIRTY=true \
   "${BUILD_SCRIPT}" --dry-run /tmp arm64 >/dev/null 2>&1; then
@@ -193,6 +263,11 @@ fi
 if PATH="${FAKE_BIN}:${PATH}" PORTSCANNER_ALLOW_DIRTY=true FAKE_TF_STATE=invalid \
   "${BUILD_SCRIPT}" --dry-run "${TF_ROOT}" arm64 >/dev/null 2>&1; then
   fail "invalid deployment-stage ordering was accepted"
+fi
+
+if PATH="${FAKE_BIN}:${PATH}" PORTSCANNER_ALLOW_DIRTY=true FAKE_TF_STATE=invalid-canary \
+  "${BUILD_SCRIPT}" --dry-run "${TF_ROOT}" arm64 >/dev/null 2>&1; then
+  fail "canary mode without installed runtime was accepted"
 fi
 
 REAL_GIT_PATH="$(PATH=/usr/bin:/bin command -v git)"
@@ -284,6 +359,19 @@ if [[ "${1:-}" == "buildx" && "${2:-}" == "build" && "${3:-}" == "--help" ]]; th
   printf '%s\n' '      --sbom string'
   exit 0
 fi
+if [[ "${1:-}" == "buildx" && "${2:-}" == "imagetools" && "${3:-}" == "inspect" ]]; then
+  image_reference="${4:-}"
+  component="${image_reference%@*}"
+  component="${component##*/}"
+  if [[ "${FAKE_IMAGE_ARCH_COMPONENT:-}" == "${component}" ]]; then
+    printf '%s\n' '{"architecture":"amd64","os":"linux"}'
+  elif [[ "${component}" == "operator" || "${component}" == "scanner" ]]; then
+    printf '%s\n' '{"linux/arm64":{"architecture":"arm64","os":"linux"}}'
+  else
+    printf '%s\n' '{"architecture":"arm64","os":"linux"}'
+  fi
+  exit 0
+fi
 if [[ "${1:-}" == "login" ]]; then
   read -r _password || true
   exit 0
@@ -370,8 +458,27 @@ for component in inventory generator parser processor migrator operator scanner;
 done
 [[ "${PUBLISH_OUTPUT}" == *"migration_checksum = \""* ]] ||
   fail "resumed publication omitted migration checksum"
+[[ "${PUBLISH_OUTPUT}" == *'lambda_architecture = "arm64"'* ]] ||
+  fail "resumed publication omitted Lambda architecture"
+[[ "${PUBLISH_OUTPUT}" == *'node_ami_type = "AL2023_ARM_64_STANDARD"'* ]] ||
+  fail "resumed publication omitted node AMI architecture"
+[[ "${PUBLISH_OUTPUT}" == *'node_instance_types = ["t4g.medium"]'* ]] ||
+  fail "resumed publication omitted architecture-compatible node type"
 [[ "$(wc -l <"${TRIVY_SCAN_MARKER}" | tr -d ' ')" -eq 7 ]] ||
   fail "every reused and newly built digest was not vulnerability-scanned"
+
+if PATH="${FAKE_BIN}:${PATH}" \
+  AWS_REGION=us-east-1 \
+  DOCKER_HOST=unix:///test-docker.sock \
+  FAKE_IMAGE_ARCH_COMPONENT=inventory \
+  "${BUILD_SCRIPT}" "${TF_ROOT}" arm64 >"${STDOUT_FILE}" 2>"${STDERR_FILE}"; then
+  fail "remote architecture mismatch was accepted"
+fi
+ARCHITECTURE_LOG="$(<"${STDERR_FILE}")"
+[[ "${ARCHITECTURE_LOG}" == *"does not contain exactly the expected linux/arm64 runtime image"* ]] ||
+  fail "remote architecture mismatch was not explicit"
+[[ ! -s "${STDOUT_FILE}" ]] ||
+  fail "digest output was emitted after a remote architecture mismatch"
 
 if PATH="${FAKE_BIN}:${PATH}" \
   AWS_REGION=us-east-1 \

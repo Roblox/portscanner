@@ -16,6 +16,7 @@ from portscanner_generator.event_reader import (
     read_target_event,
 )
 from portscanner_generator.handler import GeneratorServices, lambda_handler
+from portscanner_generator.idempotency import ClaimState
 
 from .fakes import (
     NOW,
@@ -195,7 +196,7 @@ class EventReaderTests(unittest.TestCase):
 
         self.assertIs(event, expected)
 
-    def test_wrong_source_and_malformed_json_are_acknowledged(self) -> None:
+    def test_wrong_source_and_malformed_json_are_redriven(self) -> None:
         malformed = sqs_record("{not-json")
         wrong_source = sqs_record(
             event_document(),
@@ -221,11 +222,19 @@ class EventReaderTests(unittest.TestCase):
             services=services,
         )
 
-        self.assertEqual(response, {"batchItemFailures": []})
+        self.assertEqual(
+            response,
+            {
+                "batchItemFailures": [
+                    {"itemIdentifier": "message-example-0002"},
+                    {"itemIdentifier": "message-example-0001"},
+                ]
+            },
+        )
         self.assertEqual(claims.acquired, [])
         self.assertEqual(scanner.created, [])
 
-    def test_expired_event_is_deterministically_acknowledged(self) -> None:
+    def test_expired_event_is_claimed_and_finalized_without_creation(self) -> None:
         document = event_document(not_after=NOW)
         s3 = FakeS3(json.dumps(document).encode())
         claims = FakeClaimStore()
@@ -247,10 +256,11 @@ class EventReaderTests(unittest.TestCase):
         )
 
         self.assertEqual(response, {"batchItemFailures": []})
-        self.assertEqual(claims.acquired, [])
+        self.assertEqual(len(claims.acquired), 1)
+        self.assertEqual(claims.completed[0]["state"], ClaimState.EXPIRED)
         self.assertEqual(scanner.created, [])
 
-    def test_dispatch_deadline_is_rejected_before_claim_at_boundary(self) -> None:
+    def test_dispatch_deadline_is_finalized_after_claim_at_boundary(self) -> None:
         document = event_document(
             deadline_at=NOW,
             not_after=NOW + timedelta(minutes=30),
@@ -274,12 +284,34 @@ class EventReaderTests(unittest.TestCase):
         )
 
         self.assertEqual(response, {"batchItemFailures": []})
-        self.assertEqual(claims.acquired, [])
+        self.assertEqual(len(claims.acquired), 1)
+        self.assertEqual(claims.completed[0]["state"], ClaimState.EXPIRED)
         self.assertEqual(scanner.created, [])
 
     def test_configuration_rejects_wrong_api_group(self) -> None:
         with self.assertRaises(ConfigurationError):
             config(api_group="other.example")
+
+    def test_configuration_parses_canonical_cidrs_and_applies_denies_first(self) -> None:
+        environment = {
+            "TARGET_EVENT_BUCKET": "event-fixtures",
+            "TARGET_EVENT_PREFIX": "target-events/",
+            "IDEMPOTENCY_TABLE": "event-claims",
+            "EKS_CLUSTER_NAME": "scanner-cluster",
+            "K8S_NAMESPACE": "scanner-system",
+            "AWS_REGION": "us-east-1",
+            "ALLOWED_TARGET_CIDRS": "203.0.113.0/24",
+            "DENIED_TARGET_CIDRS": "203.0.113.10/32",
+        }
+        settings = GeneratorConfig.from_environment(environment)
+
+        self.assertTrue(settings.target_allowed("203.0.113.11"))
+        self.assertFalse(settings.target_allowed("203.0.113.10"))
+        self.assertFalse(settings.target_allowed("198.51.100.1"))
+
+        environment["ALLOWED_TARGET_CIDRS"] = "203.0.113.10/24"
+        with self.assertRaisesRegex(ConfigurationError, "canonical IPv4"):
+            GeneratorConfig.from_environment(environment)
 
     def test_not_after_boundary_includes_later_time(self) -> None:
         document = event_document(not_after=NOW - timedelta(microseconds=1))
@@ -300,7 +332,8 @@ class EventReaderTests(unittest.TestCase):
             services=services,
         )
         self.assertEqual(result["batchItemFailures"], [])
-        self.assertFalse(claims.acquired)
+        self.assertEqual(len(claims.acquired), 1)
+        self.assertEqual(claims.completed[0]["state"], ClaimState.EXPIRED)
 
 
 if __name__ == "__main__":

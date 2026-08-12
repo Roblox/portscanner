@@ -105,19 +105,20 @@ helm install portscanner ./chart/portscanner \
   --set-string generator.rbac.group=portscanner:generator
 ```
 
-The chart owns the CRD, operator RBAC and Deployment, scanner ServiceAccounts
-and least-privilege RBAC, both PriorityClasses, and the release-namespace
-generator Role/RoleBinding. That Role grants only CRUD access to
-`scanning.portscanner.io/scanners`; its EKS group defaults to
-`portscanner:generator` and is configurable with `generator.rbac.group`. Configure
-`scanner.namespaces` when Scanner resources will live outside the Helm release
-namespace. Those namespaces must already exist.
+The chart owns the CRD, namespace-scoped operator RBAC and Deployment, scanner
+ServiceAccount/RBAC, both PriorityClasses, scanner Pod/Job quotas, and the generator
+Role/RoleBinding. The operator cache, leader-election lease, generator access, scanner
+Jobs, and quotas are deliberately restricted to the Helm release namespace, so quota
+limits cannot multiply or be bypassed in another namespace. The generator Role grants
+only CRUD access to `scanning.portscanner.io/scanners`; its EKS group defaults to
+`portscanner:generator` and is configurable with `generator.rbac.group`.
 
 All images, ServiceAccount names, result destination values, PriorityClass
 names, resource bounds, node selectors, tolerations, and operator settings are
 configurable in `values.yaml`. No cloud account, registry, node type, or scan
-namespace is embedded in controller code. The all-zero operator/scanner digests
-and placeholder result bucket in the default values are render-only
+namespace is embedded in Scanner resource data; the chart pins the controller's
+single namespace explicitly. The all-zero operator/scanner digests and placeholder
+result bucket in the default values are render-only
 placeholders and must be replaced before deployment.
 
 ## Security

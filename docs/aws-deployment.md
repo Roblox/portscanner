@@ -62,14 +62,16 @@ account-wide services.
 
 ### CloudTrail and change signals
 
-- **Clean-account mode:** without `existing_cloudtrail_arn`, Terraform creates a
-  multi-Region management trail. The narrowly filtered EventBridge routes remain paused
-  through earlier stages and receive only events emitted in the Terraform provider
-  Region; a multi-Region trail does not make one regional EventBridge rule global.
-- **Existing CloudTrail mode:** provide `existing_cloudtrail_arn` for a validated
-  multi-Region management trail rather than creating a duplicate trail.
-- **Signals disabled:** this is fully supported. Snapshot-driven discovery and
-  reconciliation remain authoritative.
+- **Create mode:** set `cloudtrail_mode = "create"` to provision a project-owned
+  multi-Region management trail. Narrowly filtered EventBridge routes still receive only
+  events emitted in the Terraform provider Region; a multi-Region trail does not make
+  one regional EventBridge rule global.
+- **Existing mode:** set `cloudtrail_mode = "existing"` and provide
+  `existing_cloudtrail_arn` for a validated multi-Region management trail rather than
+  creating a duplicate trail.
+- **Disabled mode:** set `cloudtrail_mode = "disabled"` to omit the local CloudTrail and
+  API-call rule. Native EC2 state hints may still be enabled later, while snapshot-driven
+  discovery and reconciliation remain authoritative.
 
 For hot-path signals in another Region, deploy a uniquely named member forwarding root
 in that account and Region, pointing it at the central bus. It must create or explicitly
@@ -102,10 +104,24 @@ archive, event-bus, and delivery costs before activation.
   route table. AWS China names are checked per service because required endpoints use a
   mix of `com.amazonaws` and `cn.com.amazonaws` prefixes. Review endpoint policies
   separately because network reachability does not prove that a policy permits every
-  required API action.
+  required API action. Endpoint-only mode can support paused AWS control-plane
+  infrastructure, but it cannot route scanner traffic to public IPv4 targets. Terraform
+  rejects canary or full dispatch in that mode; scanner subnets must use validated NAT
+  gateway or transit-gateway public egress before dispatch. NAT mode requires
+  `existing_public_nat_gateway_ids` to match every selected private default route and
+  verifies that each gateway is available, public, and in the selected VPC. Because
+  Terraform cannot prove the downstream topology of a TGW, that mode additionally
+  requires a reviewed attestation that the default routes are active/non-blackhole and
+  the downstream path reaches public egress via
+  `existing_transit_gateway_public_egress_acknowledged = true`.
 
 The first release's application module creates its EKS cluster. Adopting an unrelated
 existing cluster is not a documented deployment mode.
+
+The EKS API is private by default. A disposable evaluation may explicitly set
+`eks_endpoint_public_access = true` with one or more restricted canonical IPv4 prefixes
+in `eks_public_access_cidrs`; private access remains enabled and `0.0.0.0/0` is rejected.
+Production should use the private endpoint with approved runner or VPN security groups.
 
 Confirm that egress has a stable, documented source, packet rates can be limited, return
 traffic is allowed, and the path genuinely exercises the public edge.
@@ -118,10 +134,11 @@ state and receive an unambiguous `ACTIVE` ownership verdict immediately before c
 scanner work.
 
 `allowed_target_cidrs` and `denied_target_cidrs` are optional sets of canonical IPv4
-prefixes. Terraform passes them through the EKS module and Helm to the operator, which
-adds nonempty lists to scanner Jobs as deployment policy. Scanner-enforced denies apply
-first. An empty allowlist means no additional CIDR restriction; it does not bypass the
-account or current-ownership gates.
+prefixes. Terraform passes them to the generator and through EKS/Helm to the scanner.
+The generator applies deny-first membership before ownership API calls or Scanner
+creation, and the worker repeats it before Nmap as defense in depth. An empty allowlist
+means no additional CIDR restriction; it does not bypass the account or
+current-ownership gates.
 
 CIDR allowlisting is useful defense-in-depth for fixed Elastic IP ranges, but is often
 impractical for dynamic public addresses. It is not part of a `Scanner` resource or
@@ -133,8 +150,10 @@ user event, and matching a prefix never authorizes scanning a third party.
 - an AWS deployment role obtained through short-lived credentials or OIDC;
 - Git, the AWS CLI, Docker buildx, `jq`, and Python 3 for the image publication
   helper;
-- the AWS CLI on every migrate/install/activate runner, because Helm refreshes EKS
-  credentials with `aws eks get-token`;
+- the AWS CLI on every staged runner, with
+  `PORTSCANNER_EXPECTED_AWS_ACCOUNT_ID` and `PORTSCANNER_EXPECTED_AWS_REGION` set; the
+  helper verifies STS identity before planning, and Helm later refreshes EKS credentials
+  with `aws eks get-token`;
 - a remote Terraform backend with locking and restricted access;
 - a container registry and immutable image-digest policy;
 - a Kubernetes cluster or approval to create one;
@@ -146,26 +165,38 @@ user event, and matching a prefix never authorizes scanning a third party.
 
 ## Staged activation
 
-Use separate reviewed plans for each stage. Preserve the plan output and deployment
-identity in the change record. The public helper accepts `foundation`, `runtime`,
-`migrate`, or `activate`:
+Use separate reviewed plans for each stage. Preserve the redacted textual plan output and
+deployment identity in the change record; saved binary plans can contain sensitive
+values and the helper removes its temporary plan after applying it. The public helper
+accepts `foundation`, `runtime`, `migrate`, `canary`, `pause-canary`, `activate`, or
+`pause`:
 
 ```bash
 terraform/aws/scripts/deploy.sh "${TF_ROOT}" foundation
 ```
 
-The stages map to four explicit application flags:
+The stages map to six explicit application flags:
 
 - `deploy_runtime`;
 - `run_migration`;
-- `install_operator`; and
-- `enable_event_dispatch`.
+- `install_operator`;
+- `enable_event_dispatch`;
+- `enable_automatic_inventory`; and
+- `canary_mode`.
 
-The foundation keeps all four false. All examples contain synthetic defaults and expose
+The foundation keeps all six false. All examples contain synthetic defaults and expose
 names, accounts, VPC/subnets, member maps, API-client security groups, and installer
 principals as variables. Supply live values, `image_digests`, and `migration_checksum`
 through a reviewed ignored private variable file, never by editing or committing an
 example.
+
+The helper accepts multiple variable files in order, so private environment values can
+remain separate from the generated image digest/checksum values:
+
+```bash
+terraform/aws/scripts/deploy.sh \
+  "${TF_ROOT}" runtime "${ENV_VARS}" "${IMAGE_VARS}"
+```
 
 ### 1. Plan foundations with all producers disabled
 
@@ -214,9 +245,11 @@ release build.
 
 For an ARM deployment, `arm64` maps to `linux/arm64`,
 `lambda_architecture = "arm64"`, and `node_ami_type =
-"AL2023_ARM_64_STANDARD"`. For x86, `x86_64` maps to `linux/amd64`,
+"AL2023_ARM_64_STANDARD"` with an ARM instance such as `t4g.medium`. For x86,
+`x86_64` maps to `linux/amd64`,
 `lambda_architecture = "x86_64"`, and `node_ami_type =
-"AL2023_x86_64_STANDARD"`. Every component in one deployment must use the same mapping.
+"AL2023_x86_64_STANDARD"` with an x86 instance such as `t3.medium`. Every component in
+one deployment must use the same mapping.
 
 With the reviewed commit checked out cleanly, Trivy installed, and the AWS identity and
 Region configured, push all images and capture only the final HCL:
@@ -241,8 +274,14 @@ reuses an existing valid digest. Only a successful ECR tagged-image listing that
 build; lookup errors or malformed existing digests stop the run. A partially completed
 seven-image publication can therefore be rerun without attempting to overwrite
 immutable tags. Every reused or newly pushed digest must pass a fixable
-HIGH/CRITICAL Trivy scan before the helper emits Terraform input. It never runs
-Terraform apply or enables dispatch.
+HIGH/CRITICAL Trivy scan, and Buildx inspection must show exactly the selected Linux
+runtime platform (attestation manifests do not count as runtime platforms), before the
+helper emits Terraform input. It never runs Terraform apply or enables dispatch.
+
+The requested build architecture must equal the applied root's
+`workload_architecture` output. The emitted input also preserves that applied contract's
+`lambda_architecture`, EKS AMI type, and exact node-instance list, so image and runtime
+architecture cannot drift silently.
 
 ECR count-based expiration is disabled. Optional lifecycle configuration expires only
 untagged images; Terraform never expires tagged immutable releases. Operators must keep
@@ -268,39 +307,74 @@ digest and that no static cloud credential exists in a Secret or image layer.
 Back up the database. The `migrate` stage sets `run_migration = true` with a
 content-derived `migration_checksum`, passes that checksum to the migrator, requires the
 response to verify the same value, and only then sets `install_operator = true`. The
-private EKS API must be reachable from the approved runner for the Helm install.
+EKS API must be reachable from the approved runner for the Helm install.
 
-Set `eks_installer_principal_arns` to stable IAM role/user ARNs (never STS session ARNs)
-and `eks_api_client_security_group_ids` to the runner/VPN security groups. Terraform
-creates EKS access entries with the cluster-scoped `AmazonEKSClusterAdminPolicy`; Helm
-uses AWS CLI exec authentication, not a plan-cached token. Bootstrap creator admin is
-disabled by default and is not an installer substitute. The runner credentials must
-resolve to one of the explicit principals and have private network reachability.
+Set `eks_installer_principal_arns` to stable IAM role/user ARNs (never STS session
+ARNs). For the default private API, set `eks_api_client_security_group_ids` to the
+runner/VPN security groups. A disposable evaluation may instead opt into the restricted
+public endpoint described above. Terraform creates EKS access entries with the
+cluster-scoped `AmazonEKSClusterAdminPolicy`; Helm uses AWS CLI exec authentication,
+not a plan-cached token. Bootstrap creator admin is disabled by default and is not an
+installer substitute. The runner credentials must resolve to one of the explicit
+principals and have a permitted network path.
 
 Migrations must be transactional where supported, idempotently recorded, and tested
 against both an empty database and the previously released schema. Do not run
 destructive contraction in the same release. Remove obsolete columns or constraints
 only after all old writers are gone and rollback is no longer required.
 
-### 5. Activate snapshot collection
+### 5. Enable the one-shot canary pipeline
 
-With event dispatch still false, invoke one read-only source in one Region. Validate
-pagination, snapshot completeness, stable Target identities, monotonic generations,
-metadata redaction, and expected removal behavior.
+Run the `canary` stage. It enables the priority/result queue and DynamoDB stream
+consumers needed for one new Target while keeping signal/coverage consumers, recurring
+automatic-inventory schedules, and EventBridge inventory hints disabled. The bounded
+outbox-replay repair schedule remains enabled so a stream outage cannot lose committed
+TargetEvents. Use an explicit account allowlist and a one-address target CIDR allowlist
+as defense-in-depth.
 
-### 6. Activate a bounded canary
+### 6. Invoke one bounded target
 
-Enable dispatch only for an explicit account allowlist. For a fixed authorized address
-range, add a small CIDR allowlist as defense-in-depth. Use the lowest rate and narrowest
-profile. Verify ownership rereads, source vantage, deadline handling, evidence upload,
-UNKNOWN behavior, and cleanup.
+Invoke the snapshot function once with `account_id`, `region`, and the exact canonical
+`target_public_ipv4`. The snapshot adapter still performs read-only inventory pagination,
+but reconciliation accepts only the matching address and suppresses absence removals for
+that scoped invocation. Canary mode rejects missing or unauthorized account/Region
+scope and requires a complete inventory response with exactly one matching target before
+reconciliation.
+
+A new Target receives the bounded `fast-full-tcp` profile over ports 1-65535; obtain
+approval for that exact profile rather than describing the canary as a narrow port check.
+Verify stable Target identity, ownership rereads, source vantage, deadline handling,
+evidence upload, UNKNOWN behavior, finding handoff, and cleanup.
+
+Created-VPC roots output `scanner_egress_public_ips` so a canary can admit only the
+scanner's stable NAT address. All central examples expose the external finding queue and
+bucket values needed to verify the handoff.
 
 ### 7. Add signals and periodic coverage
 
 Run the `activate` stage only after the snapshot/canary checks. It sets
-`enable_event_dispatch = true`, enabling the previously paused mappings, schedules, and
-filtered signal rules. Confirm that a duplicate or reordered signal causes only an
-idempotent reread and that known-door reconciliation retains reserved capacity.
+`enable_automatic_inventory = true` in addition to the already tested dispatch pipeline,
+enabling recurring schedules and filtered signal rules. Confirm that a duplicate or
+reordered signal causes only an idempotent reread and that known-door reconciliation
+retains reserved capacity.
+
+To stop directly after the bounded canary, run `pause-canary`; it retains the runtime's
+fail-closed canary requirement while forcing mappings, schedules, and signal rules off.
+After full activation, use `pause`. Both pause stages inspect the saved plan and reject
+migration, image, Helm, or other changes outside dispatch mappings and rules.
+
+If Helm refresh or the Kubernetes API is unavailable, use the independent AWS-side
+brake instead:
+
+```bash
+terraform/aws/scripts/emergency-pause.sh "${TF_ROOT}"
+```
+
+It reads state outputs without planning, verifies the expected AWS account and Region,
+then directly disables every managed Lambda event-source mapping and EventBridge rule.
+It is idempotent and does not contact EKS. This stops new dispatch but does not terminate
+scanner Jobs already running; use the separately authorized Kubernetes or AWS
+network/node-group stop procedure for those Jobs.
 
 ### 8. Expand in reviewed increments
 
@@ -312,7 +386,9 @@ expansion.
 
 ## Rollback
 
-Disable signal intake and dispatch first; preserve inventory and evidence for diagnosis.
+Run the normal `pause` stage to disable signal intake and dispatch first. If cluster
+reachability prevents the Terraform refresh, run `emergency-pause.sh` first and
+reconcile Terraform state later. Preserve inventory and evidence for diagnosis.
 Roll workloads back to the prior image digests only while the expanded database schema
 remains compatible. Do not reverse a migration that would discard evidence during an
 incident.
@@ -326,6 +402,10 @@ Buckets retain versions and default to `force_destroy_buckets = false`. A dispos
 sandbox that must clean itself up may explicitly set this variable to `true`; retained
 or production environments should keep the default and use a reviewed evidence
 retention/export procedure before destroy.
+
+ECR repositories likewise retain images by default. A disposable evaluation may set
+`force_delete_repositories = true`; production must keep it false and retire release
+images through the reviewed retention process.
 
 The manual sandbox workflow is intentionally inert until repository variables and an
 approval-protected environment are configured. Its cleanup step runs with an

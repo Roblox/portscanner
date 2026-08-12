@@ -18,6 +18,7 @@ ROOT: Final = Path(__file__).resolve().parents[1]
 LEGAL_FILES: Final = ("LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md")
 IMAGE_CHECK: Final = r"""
 import hashlib
+import importlib
 import importlib.metadata
 import json
 import pathlib
@@ -25,7 +26,8 @@ import subprocess
 import sys
 
 expected_legal = json.loads(sys.argv[1])
-distributions = sys.argv[2:]
+distributions = json.loads(sys.argv[2])
+handlers = json.loads(sys.argv[3])
 for filename, expected_digest in expected_legal.items():
     path = pathlib.Path("/licenses") / filename
     if not path.is_file():
@@ -79,6 +81,15 @@ for name in distributions:
     files = [str(path) for path in distribution.files or ()]
     if not any(path.endswith(".dist-info/licenses/LICENSE") for path in files):
         raise SystemExit(f"{name} wheel metadata does not contain licenses/LICENSE")
+
+for handler in handlers:
+    module_name, separator, attribute_name = handler.rpartition(".")
+    if not separator:
+        raise SystemExit(f"invalid Lambda handler command: {handler}")
+    module = importlib.import_module(module_name)
+    resolved = getattr(module, attribute_name, None)
+    if not callable(resolved):
+        raise SystemExit(f"Lambda handler command does not resolve to a callable: {handler}")
 """
 
 
@@ -90,6 +101,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="append",
         required=True,
         help="installed first-party distribution to inspect; may be repeated",
+    )
+    parser.add_argument(
+        "--handler",
+        action="append",
+        default=[],
+        help="Lambda handler command to import and resolve; may be repeated",
     )
     return parser
 
@@ -113,13 +130,18 @@ def main() -> int:
         docker,
         "run",
         "--rm",
+        "--env",
+        "AWS_EC2_METADATA_DISABLED=true",
+        "--env",
+        "AWS_REGION=us-east-1",
         "--entrypoint",
         "python",
         args.image,
         "-c",
         IMAGE_CHECK,
         json.dumps(expected_legal, sort_keys=True),
-        *args.distribution,
+        json.dumps(args.distribution),
+        json.dumps(args.handler),
     )
     result = subprocess.run(command, check=False)  # noqa: S603
     return result.returncode

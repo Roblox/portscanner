@@ -41,7 +41,9 @@ Policy converts inventory state into immutable work:
 - `policy_change` uses priority work bounded by the current ingress-derived candidates,
   or fast full TCP when those candidates are not narrower;
 - known doors stay on a periodic reconciliation cadence;
-- every item has a deadline, maximum attempts, scan profile, and rate class;
+- every item has a deadline, maximum attempts, and scan profile; deployment-wide
+  scanner rates, a hard active-Pod quota, and per-destination serialization bound
+  execution;
 - deterministic keys collapse duplicate snapshot pages, signals, and deliveries.
 
 The scheduling rule is: **The sweep continues. The change jumps the line.**

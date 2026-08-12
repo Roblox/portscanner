@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from datetime import timedelta
+from decimal import Decimal
 
 from portscanner_generator.idempotency import (
     ClaimDisposition,
@@ -86,6 +87,9 @@ class IdempotencyTests(unittest.TestCase):
         table = FakeDynamoTable()
         store = DynamoClaimStore(table, lease_seconds=120)
         acquire(store, owner="owner-one")
+        item = next(iter(table.items.values()))
+        item["leaseExpiresAt"] = Decimal(item["leaseExpiresAt"])
+        item["attempts"] = Decimal(item["attempts"])
 
         busy = acquire(
             store,
@@ -100,6 +104,7 @@ class IdempotencyTests(unittest.TestCase):
 
         self.assertIs(busy.disposition, ClaimDisposition.BUSY)
         self.assertIs(recovered.disposition, ClaimDisposition.ACQUIRED)
+        self.assertEqual(recovered.claim.attempt, 2)  # type: ignore[union-attr]
         self.assertEqual(
             recovered.claim.owner,  # type: ignore[union-attr]
             "owner-three",

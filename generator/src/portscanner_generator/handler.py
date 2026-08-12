@@ -275,19 +275,6 @@ def process_sqs_record(
     is_removal = _event_type(event) == "target.removed"
     deadline_at = None if is_removal else _event_time(event.scan.deadline_at, "scan.deadline_at")
     not_after = None if is_removal else _event_time(event.scan.not_after, "scan.not_after")
-    if (deadline_at is not None and current >= deadline_at) or (
-        not_after is not None and current >= not_after
-    ):
-        _log(
-            logging.INFO,
-            "event_rejected",
-            event_hash=event_hash,
-            trace_hash=trace_hash,
-            target_hash=opaque_target_hash,
-            generation=event.target.generation,
-            outcome="expired",
-        )
-        return RecordOutcome("expired", event_hash, trace_hash)
 
     try:
         claim_result = services.claim_store.acquire(
@@ -330,6 +317,47 @@ def process_sqs_record(
             "claim_missing",
             event_hash=event_hash,
             trace_hash=trace_hash,
+        )
+
+    if not is_removal and not services.config.target_allowed(str(event.target.public_address)):
+        try:
+            exact_deleted = cancel_event_scanner(
+                services.scanner_client(),
+                event_id=event.event_id,
+            )
+            services.claim_store.complete(
+                claim,
+                state=ClaimState.CANCELLED,
+                now=services.clock(),
+                verdict="scope-denied",
+                scanner_name=scanner_name(event.event_id),
+                cancelled_count=int(exact_deleted),
+            )
+        except Exception as error:
+            _retry_claim(services, claim, error_code="scope_denial_failed")
+            raise RetryableRecordError(
+                "scope_denial_failed",
+                event_hash=event_hash,
+                trace_hash=trace_hash,
+                verdict="scope-denied",
+            ) from error
+        _log(
+            logging.WARNING,
+            "event_rejected",
+            event_hash=event_hash,
+            trace_hash=trace_hash,
+            target_hash=opaque_target_hash,
+            generation=event.target.generation,
+            verdict="scope-denied",
+            outcome="scope_denied",
+            cancelled=int(exact_deleted),
+        )
+        return RecordOutcome(
+            "scope_denied",
+            event_hash,
+            trace_hash,
+            "scope-denied",
+            int(exact_deleted),
         )
 
     try:
@@ -680,8 +708,9 @@ def lambda_handler(
                 "record_rejected",
                 message_hash=message_hash,
                 error_code=error.code,
-                outcome="acknowledged",
+                outcome="quarantine",
             )
+            failures.append({"itemIdentifier": message_id})
         except RetryableRecordError as error:
             _log(
                 logging.WARNING,

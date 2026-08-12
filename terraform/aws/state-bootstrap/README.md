@@ -4,9 +4,13 @@ Apply this root once with ordinary AWS environment credentials; no profile is em
 
 ```sh
 terraform init
-terraform apply -var='aws_region=us-east-1'
+terraform apply \
+  -var='aws_region=us-east-1' \
+  -var='expected_deployment_account_id=REPLACE_WITH_12_DIGIT_ACCOUNT_ID'
 terraform output backend_configuration
 ```
+
+The AWS provider refuses credentials from any other account.
 
 Store the output values in an out-of-band backend configuration file, add a unique `key` such as `environments/example-central.tfstate` for every root, and initialize with `terraform init -backend-config=...`. Do not put credentials in that file or reuse a key between roots.
 

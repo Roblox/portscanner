@@ -49,9 +49,31 @@ def test_rejects_unpaired_and_malformed_migrations(tmp_path: Path) -> None:
     (tmp_path / "000001_first.up.sql").write_text("SELECT 1;", encoding="utf-8")
     with pytest.raises(MigrationError, match="missing its down"):
         discover_migrations(tmp_path)
+    with pytest.raises(MigrationError, match="missing its down"):
+        migration_set_checksum(tmp_path)
 
     (tmp_path / "000001_first.down.sql").write_text("SELECT -1;", encoding="utf-8")
     (tmp_path / "bad.sql").write_text("SELECT 0;", encoding="utf-8")
+    with pytest.raises(MigrationError, match="invalid migration filename"):
+        discover_migrations(tmp_path)
+
+
+def test_rejects_migration_version_gaps_from_checksum_and_discovery(tmp_path: Path) -> None:
+    _write_pair(tmp_path, "000001", "first", "SELECT 1;", "SELECT -1;")
+    _write_pair(tmp_path, "000003", "third", "SELECT 3;", "SELECT -3;")
+
+    with pytest.raises(MigrationError, match="contiguous"):
+        discover_migrations(tmp_path)
+    with pytest.raises(MigrationError, match="contiguous"):
+        migration_set_checksum(tmp_path)
+
+
+def test_rejects_non_migration_artifacts_from_checksum_and_discovery(tmp_path: Path) -> None:
+    _write_pair(tmp_path, "000001", "first", "SELECT 1;", "SELECT -1;")
+    (tmp_path / "README.txt").write_text("not part of the release", encoding="utf-8")
+
+    with pytest.raises(MigrationError, match="invalid migration"):
+        migration_set_checksum(tmp_path)
     with pytest.raises(MigrationError, match="invalid migration filename"):
         discover_migrations(tmp_path)
 

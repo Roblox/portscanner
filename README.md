@@ -5,10 +5,28 @@ SPDX-License-Identifier: MIT
 
 # Portscanner
 
-Portscanner is a self-hosted reference architecture for continuously verifying the
-Internet-facing ports of cloud assets you are authorized to test. It combines complete
-inventory snapshots, optional change signals, bounded scan policy, and outside-vantage
-evidence.
+Portscanner is a self-hosted system for continuously verifying the Internet-facing ports
+of cloud assets you are authorized to test. It discovers public AWS addresses,
+revalidates ownership immediately before dispatch, runs bounded Nmap jobs from an
+outside vantage, and publishes normalized findings for downstream systems.
+
+## Start here
+
+Choose the smallest path that matches your goal:
+
+- **Evaluate without AWS:** install the locked development workspace and run the
+  synthetic unit, contract, migration, parser, Terraform, and Kubernetes checks. No
+  network target is scanned.
+- **Prove one AWS canary:** follow the [getting-started guide](docs/getting-started.md).
+  It deploys in stages with dispatch off, restricts the evaluation to one authorized
+  account and public `/32`, verifies that canary, and pauses again.
+- **Connect your system:** consume immutable S3 finding documents through the external
+  SQS handoff described in [integrating findings](docs/integrating-findings.md).
+
+The AWS stack includes EKS, Aurora, NAT, queues, buckets, supporting services, and
+optional CloudTrail API hints, so it incurs charges before scanning is activated. Use a
+dedicated sandbox, review the plan and [cost model](docs/costs.md), and scan only assets
+you own or are explicitly authorized to test.
 
 Its operating loop uses the exact lifecycle:
 
@@ -54,8 +72,10 @@ event path cannot starve the baseline.
 
 1. **DISCOVER** — a provider adapter reads a complete inventory snapshot. Optional
    control-plane signals identify resources worth rereading sooner.
-2. **PRIORITIZE** — policy assigns a profile, priority, rate class, and deadline to each
-   new door, changed door, or known door.
+2. **PRIORITIZE** — policy assigns a profile, priority, and deadline to each new door,
+   changed door, or known door. Deployment-wide Nmap rates plus hard scanner-Pod and
+   Job-object quotas bound aggregate work; required anti-affinity serializes work for
+   the same public destination.
 3. **VERIFY** — immediately before dispatch, the system rereads current provider state
    and revalidates that the address is still owned by the expected Target generation.
    An outside-vantage worker then performs the authorized scan.
@@ -112,16 +132,20 @@ Only scan assets you own or are explicitly authorized to test. Start with
 
 ## Validate and deploy
 
-Python 3.12 and `uv` are required for the local workspace:
+Python 3.12 and `uv` are required for the local workspace; the operator checks require
+Go and the PostgreSQL integration target requires Docker:
 
 ```bash
 make sync
 make check
 make test-go
+make test-go-envtest
 make vet-go
+make test-postgresql
 ```
 
-`make ci` adds backend-disabled Terraform validation and Kubernetes rendering.
+`make ci` adds backend-disabled Terraform validation/contract tests and Kubernetes
+rendering.
 Terraform provider installation can require network access; it is not an offline check.
 `make containers` builds all seven images from committed, tracked-only contexts. Python
 Lambda dependencies come from checked-in hash-verified `uv.lock` exports. Deployment is
@@ -131,6 +155,7 @@ an authorized canary are ready; follow the [AWS deployment guide](docs/aws-deplo
 ## Documentation
 
 - [Architecture](docs/architecture.md)
+- [Getting started](docs/getting-started.md)
 - [AWS deployment](docs/aws-deployment.md)
 - [Configuration](docs/configuration.md)
 - [Operations](docs/operations.md)
@@ -140,6 +165,7 @@ an authorized canary are ready; follow the [AWS deployment guide](docs/aws-deplo
 - [Testing](docs/testing.md)
 - [Costs](docs/costs.md)
 - [Multi-account deployment](docs/multi-account.md)
+- [Integrating findings](docs/integrating-findings.md)
 - [Adding inventory or signal sources](docs/adding-sources.md)
 
 ## Project status

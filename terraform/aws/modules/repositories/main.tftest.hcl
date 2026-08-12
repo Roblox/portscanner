@@ -29,6 +29,11 @@ run "expiration_is_disabled_by_default" {
     condition     = length(aws_ecr_lifecycle_policy.this) == 0
     error_message = "ECR lifecycle expiration must be opt-in."
   }
+
+  assert {
+    condition     = alltrue([for repository in values(aws_ecr_repository.this) : !repository.force_delete])
+    error_message = "ECR force deletion must be opt-in."
+  }
 }
 
 run "optional_expiration_never_selects_tagged_images" {
@@ -44,5 +49,18 @@ run "optional_expiration_never_selects_tagged_images" {
       jsondecode(policy.policy).rules[0].selection.tagStatus == "untagged"
     ])
     error_message = "Optional ECR expiration must select only untagged images."
+  }
+}
+
+run "disposable_evaluation_can_delete_repositories" {
+  command = plan
+
+  variables {
+    force_delete = true
+  }
+
+  assert {
+    condition     = alltrue([for repository in values(aws_ecr_repository.this) : repository.force_delete])
+    error_message = "The explicit disposable-evaluation setting must permit repository cleanup."
   }
 }

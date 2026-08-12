@@ -92,6 +92,8 @@ jobs:
 
       - name: Plan with dispatch disabled
         env:
+          AWS_SANDBOX_ACCOUNT_ID: ${{ vars.AWS_SANDBOX_ACCOUNT_ID }}
+          AWS_SANDBOX_REGION: ${{ vars.AWS_SANDBOX_REGION }}
           TF_ROOT: ${{ vars.AWS_TERRAFORM_ROOT }}
         shell: bash
         run: |
@@ -101,10 +103,14 @@ jobs:
             -no-color \
             -state="${RUNNER_TEMP}/sandbox.tfstate" \
             -var-file="${RUNNER_TEMP}/sandbox.tfvars.json" \
+            -var="aws_region=${AWS_SANDBOX_REGION}" \
+            -var="expected_deployment_account_id=${AWS_SANDBOX_ACCOUNT_ID}" \
             -var='deploy_runtime=false' \
             -var='run_migration=false' \
             -var='install_operator=false' \
             -var='enable_event_dispatch=false' \
+            -var='enable_automatic_inventory=false' \
+            -var='canary_mode=false' \
             -out="${RUNNER_TEMP}/sandbox.plan"
 
       - name: Apply bounded sandbox
@@ -135,6 +141,8 @@ jobs:
       - name: Destroy sandbox resources
         if: always()
         env:
+          AWS_SANDBOX_ACCOUNT_ID: ${{ vars.AWS_SANDBOX_ACCOUNT_ID }}
+          AWS_SANDBOX_REGION: ${{ vars.AWS_SANDBOX_REGION }}
           TF_ROOT: ${{ vars.AWS_TERRAFORM_ROOT }}
         shell: bash
         run: |
@@ -149,10 +157,14 @@ jobs:
             -no-color \
             -state="${RUNNER_TEMP}/sandbox.tfstate" \
             -var-file="${RUNNER_TEMP}/sandbox.tfvars.json" \
+            -var="aws_region=${AWS_SANDBOX_REGION}" \
+            -var="expected_deployment_account_id=${AWS_SANDBOX_ACCOUNT_ID}" \
             -var='deploy_runtime=false' \
             -var='run_migration=false' \
             -var='install_operator=false' \
-            -var='enable_event_dispatch=false'
+            -var='enable_event_dispatch=false' \
+            -var='enable_automatic_inventory=false' \
+            -var='canary_mode=false'
 
       - name: Verify cleanup
         if: always()

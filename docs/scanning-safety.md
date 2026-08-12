@@ -63,7 +63,7 @@ supported source
 ∩ current provider ownership
 ∩ optional deployment CIDR allowlist (identity when empty)
 ∩ approved scan profile
-∩ available rate budget
+∩ available scanner-Pod quota and destination serialization
 ```
 
 The scanner evaluates denies before the optional allowlist. A CIDR allowlist can provide
@@ -94,8 +94,12 @@ scan. Ambiguous current state maps to `UNKNOWN`; a retry must repeat the reread.
 
 ## Rate and disruption controls
 
-- Start at the lowest useful packet rate and concurrency.
-- Apply a global budget and a stricter per-destination budget.
+- Start with conservative `scanner_min_rate`, `scanner_max_rate`, and
+  `scanner_max_concurrent_pods` values; bound queued/retained Job objects with
+  `scanner_max_jobs`.
+- Treat `scanner_max_concurrent_pods × scanner_max_rate` as the deployment's configured
+  aggregate upper bound. Required destination-hash anti-affinity serializes active Pods
+  for one public IPv4 destination.
 - Limit Targets and ports per Job.
 - Set connect, host, process, and Job deadlines.
 - Reserve capacity for periodic reconciliation but cap priority bursts.
@@ -145,6 +149,13 @@ The operator must be able to:
 6. notify the authorization owner and provider if required.
 
 Practice this procedure before broad activation.
+
+`terraform/aws/scripts/emergency-pause.sh <central-root>` performs steps 1 and 2
+directly through the AWS APIs after validating the expected account, Region, and exact
+controls from Terraform state. It does not plan or refresh Helm and therefore does not
+need a reachable Kubernetes API. It intentionally does not terminate Jobs already
+running: use an authorized Kubernetes path for step 3, or an independently reviewed AWS
+network/node-group control for steps 3 and 4 when the cluster API is unavailable.
 
 ## Cleanup
 

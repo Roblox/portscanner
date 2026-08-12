@@ -77,6 +77,18 @@ variable "existing_private_subnet_egress_mode" {
   }
 }
 
+variable "existing_public_nat_gateway_ids" {
+  description = "Public NAT gateway IDs used by every scanner subnet default route when existing-VPC dispatch is enabled."
+  type        = set(string)
+  default     = []
+}
+
+variable "existing_transit_gateway_public_egress_acknowledged" {
+  description = "Explicit reviewed acknowledgement that the TGW default routes are active/non-blackhole and reach public scanner egress."
+  type        = bool
+  default     = false
+}
+
 variable "existing_private_vpc_endpoint_ids" {
   description = "Existing VPC endpoint IDs keyed by required AWS service when egress mode is vpc_endpoints."
   type        = map(string)
@@ -176,6 +188,12 @@ variable "bucket_expiration_days" {
 
 variable "force_destroy_buckets" {
   description = "Delete all object versions on destroy. Enable only for disposable sandboxes."
+  type        = bool
+  default     = false
+}
+
+variable "force_delete_repositories" {
+  description = "Delete ECR images with repositories during destroy. Enable only for disposable sandboxes."
   type        = bool
   default     = false
 }
@@ -301,8 +319,19 @@ variable "allowed_tag_keys" {
   }
 }
 
+variable "cloudtrail_mode" {
+  description = "create, existing, or disabled. Disabled retains native EC2 state hints but omits local API-call hints."
+  type        = string
+  default     = "create"
+
+  validation {
+    condition     = contains(["create", "existing", "disabled"], var.cloudtrail_mode)
+    error_message = "cloudtrail_mode must be create, existing, or disabled."
+  }
+}
+
 variable "existing_cloudtrail_arn" {
-  description = "Existing multi-region management trail ARN; otherwise one is created."
+  description = "Existing multi-region management trail ARN when cloudtrail_mode is existing."
   type        = string
   default     = null
 }
@@ -363,6 +392,61 @@ variable "denied_target_cidrs" {
   }
 }
 
+variable "operator_max_concurrent_reconciles" {
+  description = "Maximum concurrent Scanner reconciliations."
+  type        = number
+  default     = 4
+
+  validation {
+    condition     = var.operator_max_concurrent_reconciles >= 1 && var.operator_max_concurrent_reconciles <= 32 && floor(var.operator_max_concurrent_reconciles) == var.operator_max_concurrent_reconciles
+    error_message = "operator_max_concurrent_reconciles must be an integer between 1 and 32."
+  }
+}
+
+variable "scanner_max_concurrent_pods" {
+  description = "Hard cap on simultaneously active scanner Pods across scanner priority classes."
+  type        = number
+  default     = 4
+
+  validation {
+    condition     = var.scanner_max_concurrent_pods >= 1 && var.scanner_max_concurrent_pods <= 100 && floor(var.scanner_max_concurrent_pods) == var.scanner_max_concurrent_pods
+    error_message = "scanner_max_concurrent_pods must be an integer between 1 and 100."
+  }
+}
+
+variable "scanner_max_jobs" {
+  description = "Hard cap on active, pending, and retained scanner Job objects."
+  type        = number
+  default     = 16
+
+  validation {
+    condition     = var.scanner_max_jobs >= 1 && var.scanner_max_jobs <= 1000 && floor(var.scanner_max_jobs) == var.scanner_max_jobs
+    error_message = "scanner_max_jobs must be an integer between 1 and 1000."
+  }
+}
+
+variable "scanner_min_rate" {
+  description = "Minimum Nmap probe rate passed to every scanner Job."
+  type        = number
+  default     = 100
+
+  validation {
+    condition     = var.scanner_min_rate >= 1 && var.scanner_min_rate <= 2000 && floor(var.scanner_min_rate) == var.scanner_min_rate
+    error_message = "scanner_min_rate must be an integer between 1 and 2000."
+  }
+}
+
+variable "scanner_max_rate" {
+  description = "Maximum Nmap probe rate passed to every scanner Job."
+  type        = number
+  default     = 500
+
+  validation {
+    condition     = var.scanner_max_rate >= 1 && var.scanner_max_rate <= 5000 && floor(var.scanner_max_rate) == var.scanner_max_rate
+    error_message = "scanner_max_rate must be an integer between 1 and 5000."
+  }
+}
+
 variable "member_collector_role_arns" {
   description = "Exact member EC2 Describe-only collector role ARNs keyed by 12-digit account ID."
   type        = map(string)
@@ -394,7 +478,19 @@ variable "install_operator" {
 }
 
 variable "enable_event_dispatch" {
-  description = "Final explicit activation switch for EventBridge, schedules, and event mappings."
+  description = "Enable the queue and stream pipeline after migration and operator installation."
+  type        = bool
+  default     = false
+}
+
+variable "enable_automatic_inventory" {
+  description = "Enable recurring snapshots, rescans, processing repair, and EventBridge inventory hints. Requires enable_event_dispatch."
+  type        = bool
+  default     = false
+}
+
+variable "canary_mode" {
+  description = "Require one /32 target boundary while only the one-target dispatch pipeline is active."
   type        = bool
   default     = false
 }
@@ -506,6 +602,29 @@ variable "eks_api_client_security_group_ids" {
       can(regex("^sg-[0-9a-f]+$", security_group_id))
     ])
     error_message = "eks_api_client_security_group_ids must contain valid security group IDs."
+  }
+}
+
+variable "eks_endpoint_public_access" {
+  description = "Opt in to a restricted public EKS API endpoint for an evaluation runner. Private endpoint access remains enabled."
+  type        = bool
+  default     = false
+}
+
+variable "eks_public_access_cidrs" {
+  description = "Restricted canonical IPv4 CIDRs allowed to reach the opt-in public EKS API endpoint. 0.0.0.0/0 is forbidden."
+  type        = set(string)
+  default     = []
+
+  validation {
+    condition = alltrue([
+      for cidr in var.eks_public_access_cidrs :
+      cidr != "0.0.0.0/0" &&
+      can(regex("^(0|[1-9][0-9]{0,2})(\\.(0|[1-9][0-9]{0,2})){3}/([0-9]|[12][0-9]|3[0-2])$", cidr)) &&
+      can(cidrnetmask(cidr)) &&
+      try(cidrhost(cidr, 0) == split("/", cidr)[0], false)
+    ])
+    error_message = "eks_public_access_cidrs must contain restricted canonical IPv4 prefixes; 0.0.0.0/0 is forbidden."
   }
 }
 

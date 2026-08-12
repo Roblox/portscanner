@@ -354,6 +354,62 @@ run "accept_explicit_complete_endpoint_egress" {
   }
 }
 
+run "reject_endpoint_only_subnets_when_scanner_dispatch_is_enabled" {
+  command = plan
+
+  variables {
+    scanner_public_egress_required = true
+  }
+
+  expect_failures = [terraform_data.network_validation]
+}
+
+run "accept_verified_public_nat_scanner_egress" {
+  command = plan
+
+  variables {
+    existing_private_subnet_egress_mode                    = "nat_gateway"
+    existing_private_vpc_endpoint_ids                      = {}
+    existing_private_interface_endpoint_security_group_ids = {}
+    existing_public_nat_gateway_ids                        = ["nat-00000000000000001"]
+    scanner_public_egress_required                         = true
+  }
+
+  override_data {
+    target = data.aws_route_table.existing_private["subnet-00000000000000001"]
+    values = {
+      id = "rtb-00000000000000001"
+      routes = [{
+        cidr_block     = "0.0.0.0/0"
+        nat_gateway_id = "nat-00000000000000001"
+        state          = "active"
+      }]
+    }
+  }
+
+  override_data {
+    target = data.aws_route_table.existing_private["subnet-00000000000000002"]
+    values = {
+      id = "rtb-00000000000000002"
+      routes = [{
+        cidr_block     = "0.0.0.0/0"
+        nat_gateway_id = "nat-00000000000000001"
+        state          = "active"
+      }]
+    }
+  }
+
+  override_data {
+    target = data.aws_nat_gateway.existing_public["nat-00000000000000001"]
+    values = {
+      id                = "nat-00000000000000001"
+      vpc_id            = "vpc-00000000000000001"
+      state             = "available"
+      connectivity_type = "public"
+    }
+  }
+}
+
 run "use_partition_aware_china_endpoint_names" {
   command = plan
 

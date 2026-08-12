@@ -1,6 +1,6 @@
 [build-system]
-requires = ["setuptools==80.9.0"]
-build-backend = "setuptools.build_meta"
+requires = ["hatchling==1.27.0"]
+build-backend = "hatchling.build"
 
 [project]
 name = "portscanner-migrator"
@@ -24,8 +24,11 @@ test = ["pytest"]
 [project.scripts]
 act-migrate = "act_migrator.__main__:main"
 
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.hatch.build.targets.wheel]
+packages = ["src/act_migrator"]
+
+[tool.hatch.build.hooks.custom]
+path = "hatch_build.py"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

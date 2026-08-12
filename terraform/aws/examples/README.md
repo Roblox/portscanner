@@ -22,6 +22,18 @@ application roots export both `repository_urls` and `deployment_state` for found
 and upgrade image publication. The member root does not and is explicitly rejected by
 the image helper.
 
-The examples retain the default ARM64 pairing (`lambda_architecture = "arm64"`, `node_ami_type = "AL2023_ARM_64_STANDARD"`). Build all seven images for `linux/arm64`, or change both settings and all external image builds to x86_64. The `finding` queue is an external notification handoff; no example attaches an in-stack consumer.
+The examples retain the default ARM64 pairing (`lambda_architecture = "arm64"`,
+`node_ami_type = "AL2023_ARM_64_STANDARD"`, and
+`node_instance_types = ["t4g.medium"]`). Build all seven images for `linux/arm64`, or
+change all three settings and external image builds together for x86_64 (for example,
+`AL2023_x86_64_STANDARD` with `["t3.medium"]`). The image helper verifies the applied
+architecture contract. The `finding` queue is an external notification handoff; no
+example attaches an in-stack consumer.
+
+For a guarded single-account walkthrough, copy
+`created-vpc/evaluation.tfvars.example` to the ignored
+`created-vpc/evaluation.tfvars`, replace every `REPLACE_*` value, and follow
+`docs/getting-started.md`. That file is intentionally disposable-evaluation policy, not
+a production baseline.
 
 Destroying an example can delete compute and database resources. S3/ECR retention and state safeguards may intentionally block destroy until data is reviewed and preserved.

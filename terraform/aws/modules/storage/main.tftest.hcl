@@ -37,6 +37,19 @@ run "queue_visibility_defaults_to_six_times_lambda_timeout" {
   }
 }
 
+run "inventory_table_indexes_durable_pending_outbox" {
+  command = plan
+
+  assert {
+    condition = (
+      one(aws_dynamodb_table.inventory.global_secondary_index).name == "entity-event-index" &&
+      one(aws_dynamodb_table.inventory.global_secondary_index).hash_key == "entity" &&
+      one(aws_dynamodb_table.inventory.global_secondary_index).range_key == "event_id"
+    )
+    error_message = "The inventory table must expose the durable pending-outbox replay index."
+  }
+}
+
 run "reject_visibility_below_lambda_multiplier" {
   command = plan
 

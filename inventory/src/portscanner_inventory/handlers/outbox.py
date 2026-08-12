@@ -9,6 +9,7 @@ import logging
 import os
 import re
 from collections.abc import Mapping
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import quote_plus
 
@@ -24,11 +25,98 @@ _EVENT_RE = re.compile(r"^[0-9a-f]{64}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _PAYLOAD_HASH_METADATA = "payload-sha256"
 _CONFLICT_CODES = {"ConditionalRequestConflict", "PreconditionFailed"}
+_OUTBOX_INDEX_NAME = "entity-event-index"
+_DELIVERED_ENTITY = "outbox-delivered"
+_LEGACY_DELIVERY_TTL_SECONDS = 604_800
 
 
 def _attribute(image: Mapping[str, Any], name: str) -> str | None:
     value = image.get(name)
     return str(value["S"]) if isinstance(value, Mapping) and "S" in value else None
+
+
+def _number_attribute(image: Mapping[str, Any], name: str) -> int | None:
+    value = image.get(name)
+    if not isinstance(value, Mapping) or "N" not in value:
+        return None
+    try:
+        return int(str(value["N"]))
+    except ValueError:
+        return None
+
+
+def _delivery_retention_seconds(image: Mapping[str, Any]) -> int:
+    if "delivery_ttl_seconds" not in image:
+        return _LEGACY_DELIVERY_TTL_SECONDS
+    retention_seconds = _number_attribute(image, "delivery_ttl_seconds")
+    if retention_seconds is None or not 86_400 <= retention_seconds <= 31_536_000:
+        raise ValueError("outbox delivery retention is invalid")
+    return retention_seconds
+
+
+def _mark_delivered(
+    dynamodb_client: Any,
+    image: Mapping[str, Any],
+    *,
+    table_name: str,
+    delivered_at: datetime,
+) -> None:
+    pk = _attribute(image, "pk")
+    sk = _attribute(image, "sk")
+    event_id = _attribute(image, "event_id")
+    retention_seconds = _delivery_retention_seconds(image)
+    if (
+        not pk
+        or not sk
+        or not event_id
+        or retention_seconds is None
+        or not 86_400 <= retention_seconds <= 31_536_000
+    ):
+        raise ValueError("outbox delivery state is invalid")
+    if delivered_at.tzinfo is None:
+        raise ValueError("delivery timestamp must include a timezone")
+    timestamp = delivered_at.astimezone(UTC)
+    try:
+        dynamodb_client.update_item(
+            TableName=table_name,
+            Key={"pk": {"S": pk}, "sk": {"S": sk}},
+            UpdateExpression=(
+                "SET #entity = :delivered, #delivered_at = :delivered_at, #expires = :expires"
+            ),
+            ConditionExpression="#entity = :pending AND #event_id = :event_id",
+            ExpressionAttributeNames={
+                "#entity": "entity",
+                "#event_id": "event_id",
+                "#delivered_at": "delivered_at",
+                "#expires": "expires_at",
+            },
+            ExpressionAttributeValues={
+                ":pending": {"S": "outbox"},
+                ":delivered": {"S": _DELIVERED_ENTITY},
+                ":event_id": {"S": event_id},
+                ":delivered_at": {
+                    "S": timestamp.isoformat().replace("+00:00", "Z"),
+                },
+                ":expires": {
+                    "N": str(int(timestamp.timestamp()) + retention_seconds),
+                },
+            },
+        )
+    except Exception as error:
+        if aws_error_code(error) != "ConditionalCheckFailedException":
+            raise
+        response = dynamodb_client.get_item(
+            TableName=table_name,
+            Key={"pk": {"S": pk}, "sk": {"S": sk}},
+            ConsistentRead=True,
+        )
+        item = response.get("Item") if isinstance(response, Mapping) else None
+        if (
+            not isinstance(item, Mapping)
+            or _attribute(item, "entity") != _DELIVERED_ENTITY
+            or _attribute(item, "event_id") != event_id
+        ):
+            raise
 
 
 def _etag(response: Mapping[str, Any]) -> str | None:
@@ -131,15 +219,29 @@ def dispatch_record(
     priority_queue_url: str,
     coverage_queue_url: str,
     target_event_queue_url: str,
+    dynamodb_client: Any | None = None,
+    table_name: str | None = None,
+    delivered_at: datetime | None = None,
 ) -> bool:
-    if record.get("eventName") not in {"INSERT", "MODIFY"}:
+    if record.get("eventName") != "INSERT":
         return False
+    if (dynamodb_client is None) != (table_name is None):
+        raise ValueError("DynamoDB client and table name must be configured together")
     dynamodb = record.get("dynamodb")
     if not isinstance(dynamodb, Mapping):
         raise ValueError("stream record has no DynamoDB image")
     image = dynamodb.get("NewImage")
     if not isinstance(image, Mapping) or _attribute(image, "entity") != "outbox":
         return False
+    if dynamodb_client is not None:
+        # Validate delivery-tracking identity before any S3/SQS side effect. Legacy
+        # pending rows did not carry delivery_ttl_seconds and use the original
+        # seven-day retention when finalized.
+        pk = _attribute(image, "pk")
+        sk = _attribute(image, "sk")
+        if not pk or not sk:
+            raise ValueError("outbox delivery state is invalid")
+        _delivery_retention_seconds(image)
     event_id = _attribute(image, "event_id") or ""
     account_id = _attribute(image, "account_id") or ""
     region = _attribute(image, "region") or ""
@@ -205,6 +307,13 @@ def dispatch_record(
     )
     sqs_client.send_message(QueueUrl=target_event_queue_url, MessageBody=message_body)
     sqs_client.send_message(QueueUrl=routed_queue_url, MessageBody=message_body)
+    if dynamodb_client is not None and table_name is not None:
+        _mark_delivered(
+            dynamodb_client,
+            image,
+            table_name=table_name,
+            delivered_at=delivered_at or datetime.now(UTC),
+        )
     return True
 
 
@@ -216,6 +325,7 @@ class _Runtime:
         self.settings = settings
         self.s3 = boto3.client("s3")
         self.sqs = boto3.client("sqs")
+        self.dynamodb = boto3.client("dynamodb")
 
     def process(self, record: Mapping[str, Any]) -> None:
         dispatch_record(
@@ -227,7 +337,48 @@ class _Runtime:
             priority_queue_url=self.settings.priority_queue_url,
             coverage_queue_url=self.settings.coverage_queue_url,
             target_event_queue_url=self.settings.target_event_queue_url,
+            dynamodb_client=self.dynamodb,
+            table_name=self.settings.state_table,
         )
+
+    def replay(self) -> dict[str, int]:
+        response = self.dynamodb.query(
+            TableName=self.settings.state_table,
+            IndexName=_OUTBOX_INDEX_NAME,
+            KeyConditionExpression="#entity = :pending",
+            ExpressionAttributeNames={"#entity": "entity"},
+            ExpressionAttributeValues={":pending": {"S": "outbox"}},
+            Limit=self.settings.outbox_replay_batch_size,
+        )
+        items = response.get("Items") if isinstance(response, Mapping) else None
+        if not isinstance(items, list):
+            raise ValueError("outbox replay query returned no Items list")
+        processed = 0
+        failures = 0
+        for item in items:
+            if not isinstance(item, Mapping):
+                failures += 1
+                continue
+            try:
+                if dispatch_record(
+                    {"eventName": "INSERT", "dynamodb": {"NewImage": item}},
+                    self.s3,
+                    self.sqs,
+                    bucket=self.settings.event_bucket,
+                    prefix=self.settings.event_prefix,
+                    priority_queue_url=self.settings.priority_queue_url,
+                    coverage_queue_url=self.settings.coverage_queue_url,
+                    target_event_queue_url=self.settings.target_event_queue_url,
+                    dynamodb_client=self.dynamodb,
+                    table_name=self.settings.state_table,
+                ):
+                    processed += 1
+            except Exception:
+                failures += 1
+                LOGGER.exception("outbox replay item failed")
+        if failures:
+            raise RuntimeError(f"outbox replay failed for {failures} item(s)")
+        return {"processed": processed, "failures": failures}
 
 
 _RUNTIME: _Runtime | None = None
@@ -242,6 +393,10 @@ def _runtime() -> _Runtime:
 
 def lambda_handler(event: Mapping[str, Any], _context: Any, *, runtime: Any | None = None) -> Any:
     selected = runtime or _runtime()
+    if event.get("mode") == "replay-outbox":
+        result = selected.replay()
+        structured_log(LOGGER, "outbox-replay", **result)
+        return result
     records = event.get("Records")
     if not isinstance(records, list):
         raise ValueError("outbox handler requires stream records")

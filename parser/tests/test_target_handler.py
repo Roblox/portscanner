@@ -314,7 +314,7 @@ def test_processes_removal_and_retries_pending_handoffs(
     assert publish_calls == [(("handoff-1",), 1000)]
 
 
-def test_lambda_returns_only_retryable_batch_failures(
+def test_lambda_redrives_retryable_and_permanent_batch_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(target_handler, "load_target_event_settings", _settings)
@@ -335,5 +335,8 @@ def test_lambda_returns_only_retryable_batch_failures(
         ]
     }
     assert target_handler.lambda_handler(event, None) == {
-        "batchItemFailures": [{"itemIdentifier": "retry-message"}]
+        "batchItemFailures": [
+            {"itemIdentifier": "retry-message"},
+            {"itemIdentifier": "reject-message"},
+        ]
     }

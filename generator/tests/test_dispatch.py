@@ -4,6 +4,7 @@ import copy
 import json
 import unittest
 from datetime import timedelta
+from ipaddress import IPv4Network
 
 from portscanner_inventory.base import (
     OwnershipCheck as InventoryOwnershipCheck,
@@ -49,9 +50,11 @@ def services_for(
     ownership: FakeOwnershipService,
     claims: FakeClaimStore,
     scanner: FakeScannerClient,
+    *,
+    runtime_config: GeneratorConfig | None = None,
 ) -> GeneratorServices:
     return GeneratorServices(
-        config=config(),
+        config=runtime_config or config(),
         s3_client=FakeS3(json.dumps(document).encode()),
         claim_store=claims,  # type: ignore[arg-type]
         ownership_service=ownership,
@@ -62,6 +65,45 @@ def services_for(
 
 
 class DispatchTests(unittest.TestCase):
+    def test_generator_denies_out_of_scope_target_before_ownership_or_creation(self) -> None:
+        document = event_document()
+        exact_name = scanner_name(str(document["event_id"]))
+        target = document["target"]
+        assert isinstance(target, dict)
+        scanner = FakeScannerClient(
+            items=[scanner_item(str(target["target_id"]), int(target["generation"]), exact_name)]
+        )
+        claims = FakeClaimStore()
+        ownership = FakeOwnershipService("ACTIVE")
+        scoped_config = GeneratorConfig(
+            event_bucket="event-fixtures",
+            event_prefix="target-events/",
+            table_name="event-claims",
+            cluster_name="scanner-cluster",
+            namespace="scanner-system",
+            aws_region="us-east-1",
+            allowed_target_cidrs=(IPv4Network("198.51.100.0/24"),),
+        )
+
+        response = lambda_handler(
+            {"Records": [sqs_record(document)]},
+            None,
+            services=services_for(
+                document,
+                ownership,
+                claims,
+                scanner,
+                runtime_config=scoped_config,
+            ),
+        )
+
+        self.assertEqual(response, {"batchItemFailures": []})
+        self.assertEqual(ownership.calls, [])
+        self.assertEqual(scanner.created, [])
+        self.assertEqual(scanner.deleted, [exact_name])
+        self.assertEqual(claims.completed[0]["state"], ClaimState.CANCELLED)
+        self.assertEqual(claims.completed[0]["verdict"], "scope-denied")
+
     def test_active_exact_generation_dispatches_after_cancelling_older(self) -> None:
         document = event_document()
         target_id = document["target"]["target_id"]  # type: ignore[index]

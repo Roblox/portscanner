@@ -101,7 +101,9 @@ variable files.
   opaque source ID.
 - Include source ID in every Target and result correlation key.
 - Prevent one source's snapshot from removing another source's Targets.
-- Apply per-source API, queue, dispatch, and packet budgets.
+- Before mutually untrusted or large-scale multi-source rollout, add per-source API,
+  queue, dispatch, and packet budgets; the first release provides a deployment-wide Pod
+  quota and destination serialization, not an independent per-source packet bucket.
 - Quarantine malformed or unauthorized spoke events without blocking other sources.
 - Ensure database authorization and queries cannot cross source boundaries accidentally.
 

@@ -47,6 +47,14 @@ jobs:
           make typecheck
           make test
 
+      - name: Run PostgreSQL integration tests
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: make test-postgresql
+
+      - name: Verify standalone package payloads
+        run: make test-packaging
+
   go:
     name: Go
     runs-on: ubuntu-latest
@@ -58,7 +66,20 @@ jobs:
           go-version-file: operator/go.mod
           cache-dependency-path: operator/go.sum
 
-      - name: Test each Go module
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install locked Python boundary dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check "uv==0.11.30"
+          uv sync --frozen --all-packages --group dev
+
+      - name: Test and vet each Go module
+        env:
+          PORTSCANNER_TEST_PYTHON: ${{ github.workspace }}/.venv/bin/python
         shell: bash
         run: |
           set -euo pipefail
@@ -69,11 +90,17 @@ jobs:
             (
               cd "${directory}"
               go test ./...
+              go vet ./...
             )
           done < <(git ls-files 'go.mod' '**/go.mod')
           if [[ "${found}" == "false" ]]; then
             echo "No Go modules are present."
           fi
+
+      - name: Run operator API-server integration tests
+        env:
+          PORTSCANNER_TEST_PYTHON: ${{ github.workspace }}/.venv/bin/python
+        run: make -C operator test-envtest
 
   schemas:
     name: JSON schemas

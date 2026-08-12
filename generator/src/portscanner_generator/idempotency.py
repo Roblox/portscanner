@@ -7,6 +7,7 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from enum import StrEnum
 from typing import Any
 
@@ -86,6 +87,16 @@ def _conditional_failure(error: Exception) -> bool:
         isinstance(error_data, Mapping)
         and error_data.get("Code") == "ConditionalCheckFailedException"
     )
+
+
+def _dynamodb_integer(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, Decimal) and value.is_finite() and value == value.to_integral_value():
+        return int(value)
+    return None
 
 
 class DynamoClaimStore:
@@ -174,10 +185,8 @@ class DynamoClaimStore:
                 disposition=ClaimDisposition.DUPLICATE,
                 state=state,
             )
-        existing_lease = existing.get("leaseExpiresAt")
-        lease_is_expired = isinstance(existing_lease, int) and existing_lease <= int(
-            current.timestamp()
-        )
+        existing_lease = _dynamodb_integer(existing.get("leaseExpiresAt"))
+        lease_is_expired = existing_lease is not None and existing_lease <= int(current.timestamp())
         if state is ClaimState.CLAIMED and not lease_is_expired:
             return ClaimResult(
                 disposition=ClaimDisposition.BUSY,
@@ -225,8 +234,8 @@ class DynamoClaimStore:
                 raise
             return self._classify_after_race(key, event_hash, current)
 
-        previous_attempts = existing.get("attempts", 1)
-        attempt = previous_attempts + 1 if isinstance(previous_attempts, int) else 2
+        previous_attempts = _dynamodb_integer(existing.get("attempts"))
+        attempt = previous_attempts + 1 if previous_attempts is not None else 2
         return ClaimResult(
             disposition=ClaimDisposition.ACQUIRED,
             claim=EventClaim(
@@ -372,7 +381,7 @@ class DynamoClaimStore:
         state = self._state(item)
         if state in TERMINAL_STATES:
             return ClaimResult(ClaimDisposition.DUPLICATE, state=state)
-        lease = item.get("leaseExpiresAt")
-        if state is ClaimState.CLAIMED and isinstance(lease, int) and lease > int(now.timestamp()):
+        lease = _dynamodb_integer(item.get("leaseExpiresAt"))
+        if state is ClaimState.CLAIMED and lease is not None and lease > int(now.timestamp()):
             return ClaimResult(ClaimDisposition.BUSY, state=state)
         raise ClaimStoreError("claim changed during reacquisition")

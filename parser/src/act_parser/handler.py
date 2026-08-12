@@ -364,6 +364,7 @@ def lambda_handler(event: Mapping[str, Any], _context: Any) -> dict[str, Any]:
                 "scan result rejected message_id=%s reason=permanent_notification_validation",
                 message_id,
             )
+            failures.append({"itemIdentifier": message_id})
             continue
         except Exception:
             LOGGER.exception(
@@ -373,7 +374,7 @@ def lambda_handler(event: Mapping[str, Any], _context: Any) -> dict[str, Any]:
             failures.append({"itemIdentifier": message_id})
             continue
 
-        retryable_failure = False
+        record_failure = False
         for object_index, object_record in enumerate(object_records):
             try:
                 key, version_id = _s3_record(
@@ -387,6 +388,7 @@ def lambda_handler(event: Mapping[str, Any], _context: Any) -> dict[str, Any]:
                     message_id,
                     object_index,
                 )
+                record_failure = True
                 continue
             try:
                 _process_scan_result(
@@ -401,14 +403,15 @@ def lambda_handler(event: Mapping[str, Any], _context: Any) -> dict[str, Any]:
                     message_id,
                     key,
                 )
+                record_failure = True
             except Exception:
                 LOGGER.exception(
                     "scan result object deferred message_id=%s key=%s reason=retryable_processing",
                     message_id,
                     key,
                 )
-                retryable_failure = True
-        if retryable_failure:
+                record_failure = True
+        if record_failure:
             failures.append({"itemIdentifier": message_id})
 
     return {"batchItemFailures": failures}

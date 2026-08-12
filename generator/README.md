@@ -33,10 +33,12 @@ The inventory boundary supports both `validate_event(event)` and
 
 ## Tests
 
-The tests use only in-memory fakes:
+From the repository root, install the locked workspace and run the package tests. They
+use only in-memory fakes:
 
 ```sh
-PYTHONPATH=src python -m unittest discover -s tests -t . -v
+uv sync --frozen --all-packages --group dev
+uv run --package portscanner-generator pytest generator/tests
 ```
 
 Build the Lambda image from the repository root so the shared contract and
