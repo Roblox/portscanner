@@ -1,0 +1,39 @@
+{{/*
+Copyright 2026 Roblox Corporation
+SPDX-License-Identifier: Apache-2.0
+*/}}
+{{- $root := . -}}
+{{- if or (lt (int .Values.scanner.maxConcurrentPods) 1) (gt (int .Values.scanner.maxConcurrentPods) 100) -}}
+{{- fail "scanner.maxConcurrentPods must be between 1 and 100" -}}
+{{- end -}}
+{{- if or (lt (int .Values.scanner.maxJobs) (int .Values.scanner.maxConcurrentPods)) (gt (int .Values.scanner.maxJobs) 1000) -}}
+{{- fail "scanner.maxJobs must be between scanner.maxConcurrentPods and 1000" -}}
+{{- end -}}
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: {{ include "portscanner.fullname" $root }}-scanner-concurrency
+  namespace: {{ $root.Release.Namespace }}
+  labels:
+    {{- include "portscanner.labels" $root | nindent 4 }}
+spec:
+  hard:
+    pods: {{ required "scanner.maxConcurrentPods is required" $root.Values.scanner.maxConcurrentPods | quote }}
+  scopeSelector:
+    matchExpressions:
+      - scopeName: PriorityClass
+        operator: In
+        values:
+          - {{ required "priorityClasses.normal.name is required" $root.Values.priorityClasses.normal.name }}
+          - {{ required "priorityClasses.high.name is required" $root.Values.priorityClasses.high.name }}
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: {{ include "portscanner.fullname" $root }}-scanner-jobs
+  namespace: {{ $root.Release.Namespace }}
+  labels:
+    {{- include "portscanner.labels" $root | nindent 4 }}
+spec:
+  hard:
+    count/jobs.batch: {{ required "scanner.maxJobs is required" $root.Values.scanner.maxJobs | quote }}

@@ -61,10 +61,12 @@ func TestEnvtestOneShotCreation(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create manager: %v", err)
 	}
+	jobConfig := validJobConfig()
+	jobConfig.ScannerNamespace = "scanner-envtest"
 	reconciler := &ScannerReconciler{
 		Client:    manager.GetClient(),
 		Scheme:    scheme,
-		JobConfig: validJobConfig(),
+		JobConfig: jobConfig,
 	}
 	if err := reconciler.SetupWithManager(manager, 1); err != nil {
 		t.Fatalf("set up controller: %v", err)
@@ -80,7 +82,7 @@ func TestEnvtestOneShotCreation(t *testing.T) {
 		t.Fatal("manager cache did not synchronize")
 	}
 
-	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: "scanner-envtest"}}
+	namespace := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: jobConfig.ScannerNamespace}}
 	if err := manager.GetClient().Create(ctx, namespace); err != nil {
 		t.Fatalf("create namespace: %v", err)
 	}

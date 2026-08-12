@@ -147,6 +147,21 @@ func TestBuildJobSecurityContextAndCorrelation(t *testing.T) {
 		t.Fatal("Pod template Job-name label does not match the run ID")
 	}
 	pod := job.Spec.Template.Spec
+	targetHash := job.Spec.Template.Labels[targetHashLabel]
+	if targetHash != targetAddressHash(scanner.Spec.Target.Address) || len(targetHash) != 32 {
+		t.Fatalf("target hash label %q is not the authoritative opaque destination key", targetHash)
+	}
+	if pod.Affinity == nil || pod.Affinity.PodAntiAffinity == nil {
+		t.Fatal("scanner pod must serialize work per destination")
+	}
+	terms := pod.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+	if len(terms) != 1 ||
+		terms[0].TopologyKey != corev1.LabelTopologyRegion ||
+		len(terms[0].MatchLabelKeys) != 1 ||
+		terms[0].MatchLabelKeys[0] != targetHashLabel ||
+		terms[0].NamespaceSelector == nil {
+		t.Fatalf("unexpected per-target anti-affinity: %#v", terms)
+	}
 	if pod.RestartPolicy != corev1.RestartPolicyNever {
 		t.Fatalf("RestartPolicy = %q, want Never", pod.RestartPolicy)
 	}
@@ -227,6 +242,12 @@ func TestBuildJobSecurityContextAndCorrelation(t *testing.T) {
 	if gotEnv["PORTSCANNER_IMAGE_VERSION"] != config.ScannerImage {
 		t.Fatal("scanner image version must equal the configured digest-pinned image URI")
 	}
+	arguments := strings.Join(container.Args, "\n")
+	for _, expected := range []string{"--min-rate=100", "--max-rate=500"} {
+		if !strings.Contains(arguments, expected) {
+			t.Fatalf("scanner arguments do not contain %q: %#v", expected, container.Args)
+		}
+	}
 	if len(job.Annotations) != 0 || len(job.Spec.Template.Annotations) != 0 {
 		t.Fatal("correlation must not rely on annotations")
 	}
@@ -279,6 +300,28 @@ func TestJobConfigRejectsMutableScannerImage(t *testing.T) {
 	config.ScannerImage = "example.invalid/portscanner-scanner:latest"
 	if err := config.Validate(); err == nil {
 		t.Fatal("JobConfig accepted a mutable scanner image tag")
+	}
+}
+
+func TestBuildJobRejectsScannerOutsideConfiguredNamespace(t *testing.T) {
+	now := time.Date(2026, time.August, 5, 20, 0, 0, 0, time.UTC)
+	scanner := validScanner(now)
+	scanner.Namespace = "outside"
+
+	if _, err := buildJob(scanner, validJobConfig(), now); err == nil ||
+		!strings.Contains(err.Error(), "outside configured namespace") {
+		t.Fatalf("buildJob() error = %v, want namespace rejection", err)
+	}
+}
+
+func TestJobConfigRejectsInvalidScannerRates(t *testing.T) {
+	for _, rates := range [][2]int{{0, 100}, {100, 99}, {100, 5001}} {
+		config := validJobConfig()
+		config.MinRate = rates[0]
+		config.MaxRate = rates[1]
+		if err := config.Validate(); err == nil {
+			t.Fatalf("JobConfig accepted scanner rates %d-%d", rates[0], rates[1])
+		}
 	}
 }
 
@@ -453,7 +496,10 @@ func validJobConfig() JobConfig {
 	return JobConfig{
 		ScannerImage:            "registry.example/portscanner-scanner@sha256:" + strings.Repeat("a", 64),
 		ScannerImagePullPolicy:  corev1.PullIfNotPresent,
+		ScannerNamespace:        "default",
 		ServiceAccountName:      "scanner-test",
+		MinRate:                 100,
+		MaxRate:                 500,
 		ResultBucket:            "results-test",
 		ResultPrefix:            "scans/",
 		HighPriorityClassName:   "high-scans",

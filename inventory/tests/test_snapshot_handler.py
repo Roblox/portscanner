@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from ipaddress import IPv4Address
+
+import pytest
 
 from portscanner_inventory.base import (
     OwnershipCheck,
@@ -10,8 +13,15 @@ from portscanner_inventory.base import (
     SnapshotBatch,
     SnapshotScope,
 )
+from portscanner_inventory.config import Settings
 from portscanner_inventory.events import snapshot_source
-from portscanner_inventory.handlers.snapshot import reconcile_snapshot
+from portscanner_inventory.handlers.snapshot import (
+    _requested_account_id,
+    _requested_region,
+    _requested_target_public_ipv4,
+    _Runtime,
+    reconcile_snapshot,
+)
 from portscanner_inventory.state import DynamoStateStore
 
 from .helpers import FakeDynamo, normalized_target, permission
@@ -19,6 +29,10 @@ from .helpers import FakeDynamo, normalized_target, permission
 NOW = datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC)
 SCOPE = SnapshotScope(source="ec2", account_id="123456789012", region="us-east-1")
 CONFIG_SCOPE = SnapshotScope(source="aws-config", name="example-aggregator")
+
+
+def _global_ipv4() -> str:
+    return str(IPv4Address(0x08080808))
 
 
 class Backend:
@@ -45,6 +59,157 @@ def _seed(store: DynamoStateStore):
         source=snapshot_source(SCOPE, NOW),
         now=NOW,
     ).state
+
+
+def test_canary_target_must_be_one_canonical_public_ipv4() -> None:
+    public_ip = _global_ipv4()
+    assert _requested_target_public_ipv4({"target_public_ipv4": public_ip}) == public_ip
+
+    for value in ("10.0.0.1", f"{public_ip}/32", "", 123):
+        with pytest.raises(ValueError, match="canonical public IPv4"):
+            _requested_target_public_ipv4({"target_public_ipv4": value})
+
+
+def test_snapshot_request_must_remain_inside_configured_account_and_regions() -> None:
+    settings = Settings(
+        state_table="inventory",
+        event_bucket="events",
+        snapshot_backend="ec2",
+        account_id="123456789012",
+        authorized_account_ids=("123456789012",),
+        regions=("us-east-1",),
+    )
+
+    assert _requested_account_id({}, settings) == "123456789012"
+    assert _requested_region({"region": "us-east-1"}, settings) == "us-east-1"
+
+    with pytest.raises(ValueError, match="authorized account scope"):
+        _requested_account_id({"account_id": "222222222222"}, settings)
+    with pytest.raises(ValueError, match="snapshot Region scope"):
+        _requested_region({"region": "us-west-2"}, settings)
+
+
+def test_canary_rejects_present_but_null_region_before_backend_access() -> None:
+    settings = Settings(
+        state_table="inventory",
+        event_bucket="events",
+        snapshot_backend="ec2",
+        account_id="123456789012",
+        authorized_account_ids=("123456789012",),
+        regions=("us-east-1",),
+        canary_mode=True,
+    )
+    runtime = _Runtime.__new__(_Runtime)
+    runtime.settings = settings
+
+    with pytest.raises(ValueError, match="requires account_id, region"):
+        runtime.process(
+            {
+                "account_id": "123456789012",
+                "region": None,
+                "target_public_ipv4": _global_ipv4(),
+            }
+        )
+
+
+def test_target_scoped_snapshot_reconciles_only_canary_without_removals() -> None:
+    store = DynamoStateStore(FakeDynamo(), "inventory")
+    old = _seed(store)
+    assert old is not None
+    canary = replace(
+        normalized_target(public_ip="203.0.113.20"),
+        network_interface_id="eni-bbbbbbbb",
+        private_ip="10.0.1.10",
+    )
+    outside = replace(
+        normalized_target(public_ip="203.0.113.30"),
+        network_interface_id="eni-0123456789abcdef0",
+        private_ip="10.0.2.10",
+    )
+
+    class MustNotRun:
+        def validate(self, *_args):
+            raise AssertionError("target-scoped snapshot attempted a removal")
+
+    summary = reconcile_snapshot(
+        Backend(
+            SnapshotBatch(
+                scope=SCOPE,
+                targets=(canary, outside),
+                completion=ScopeCompletion.COMPLETE,
+                pages=1,
+            )
+        ),
+        store,
+        MustNotRun(),
+        now=NOW + timedelta(minutes=1),
+        target_public_ipv4=canary.public_ip,
+        require_exact_target=True,
+    )
+
+    assert summary["targets"] == 1
+    assert summary["added"] == 1
+    assert summary["removed"] == 0
+    assert store.get(old.target_id).status == "active"
+    assert store.get(outside.target_id) is None
+
+
+def test_canary_target_must_resolve_once_before_writing_state() -> None:
+    store = DynamoStateStore(FakeDynamo(), "inventory")
+    duplicate_a = replace(
+        normalized_target(public_ip="203.0.113.20"),
+        network_interface_id="eni-bbbbbbbb",
+        private_ip="10.0.1.10",
+    )
+    duplicate_b = replace(
+        duplicate_a,
+        network_interface_id="eni-0123456789abcdef0",
+        private_ip="10.0.2.10",
+    )
+
+    with pytest.raises(ValueError, match="exactly one target"):
+        reconcile_snapshot(
+            Backend(
+                SnapshotBatch(
+                    scope=SCOPE,
+                    targets=(duplicate_a, duplicate_b),
+                    completion=ScopeCompletion.COMPLETE,
+                    pages=1,
+                )
+            ),
+            store,
+            Ownership(OwnershipVerdict.ACTIVE),
+            now=NOW,
+            target_public_ipv4=duplicate_a.public_ip,
+            require_exact_target=True,
+        )
+
+    assert store.list_current(SCOPE) == ()
+
+
+def test_canary_requires_complete_snapshot_before_writing_state() -> None:
+    store = DynamoStateStore(FakeDynamo(), "inventory")
+    target = normalized_target(public_ip=_global_ipv4())
+
+    with pytest.raises(ValueError, match="complete inventory response"):
+        reconcile_snapshot(
+            Backend(
+                SnapshotBatch(
+                    scope=SCOPE,
+                    targets=(target,),
+                    completion=ScopeCompletion.PARTIAL,
+                    pages=1,
+                    failure_code="page-failed",
+                )
+            ),
+            store,
+            Ownership(OwnershipVerdict.ACTIVE),
+            now=NOW,
+            target_public_ipv4=target.public_ip,
+            require_exact_target=True,
+        )
+
+    assert store.list_current(SCOPE) == ()
 
 
 def test_complete_snapshot_adds_and_revalidates_missing_target_before_removal() -> None:

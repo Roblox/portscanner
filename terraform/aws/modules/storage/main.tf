@@ -271,7 +271,7 @@ data "aws_iam_policy_document" "bucket" {
   }
 
   dynamic "statement" {
-    for_each = each.key == "cloudtrail" ? [1] : []
+    for_each = each.key == "cloudtrail" && length(var.cloudtrail_source_arns) > 0 ? [1] : []
     content {
       sid    = "CloudTrailAclCheck"
       effect = "Allow"
@@ -293,7 +293,7 @@ data "aws_iam_policy_document" "bucket" {
   }
 
   dynamic "statement" {
-    for_each = each.key == "cloudtrail" ? [1] : []
+    for_each = each.key == "cloudtrail" && length(var.cloudtrail_source_arns) > 0 ? [1] : []
     content {
       sid    = "CloudTrailWrite"
       effect = "Allow"
@@ -672,6 +672,23 @@ resource "aws_dynamodb_table" "inventory" {
   attribute {
     name = "sk"
     type = "S"
+  }
+
+  attribute {
+    name = "entity"
+    type = "S"
+  }
+
+  attribute {
+    name = "event_id"
+    type = "S"
+  }
+
+  global_secondary_index {
+    name            = "entity-event-index"
+    hash_key        = "entity"
+    range_key       = "event_id"
+    projection_type = "ALL"
   }
 
   stream_enabled   = true

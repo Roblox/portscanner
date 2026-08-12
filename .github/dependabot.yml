@@ -37,7 +37,12 @@ updates:
           - patch
 
   - package-ecosystem: terraform
-    directory: /terraform/aws
+    directories:
+      - /terraform/aws/examples/created-vpc
+      - /terraform/aws/examples/existing-vpc
+      - /terraform/aws/examples/member-account
+      - /terraform/aws/examples/multi-account-central
+      - /terraform/aws/state-bootstrap
     schedule:
       interval: weekly
       day: monday

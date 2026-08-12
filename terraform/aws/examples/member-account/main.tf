@@ -16,6 +16,17 @@ variable "aws_region" {
   default = "us-east-1"
 }
 
+variable "expected_deployment_account_id" {
+  description = "Fail-closed AWS account boundary for this member Terraform root."
+  type        = string
+  default     = "123456789012"
+
+  validation {
+    condition     = can(regex("^[0-9]{12}$", var.expected_deployment_account_id))
+    error_message = "expected_deployment_account_id must be a 12-digit AWS account ID."
+  }
+}
+
 variable "name_prefix" {
   description = "Synthetic default; use a unique per-account/per-signal-region name."
   type        = string
@@ -93,7 +104,8 @@ variable "existing_cloudtrail_arn" {
 }
 
 provider "aws" {
-  region = var.aws_region
+  region              = var.aws_region
+  allowed_account_ids = [var.expected_deployment_account_id]
 
   default_tags {
     tags = {

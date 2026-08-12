@@ -40,7 +40,25 @@ Run the Go operator independently:
 
 ```bash
 make test-go
+make test-go-envtest
 make vet-go
+```
+
+Run the real migration and parser database paths against an isolated, digest-pinned
+PostgreSQL 16 container:
+
+```bash
+make test-postgresql
+```
+
+The helper binds PostgreSQL only to an ephemeral localhost port and removes the
+container on exit. Core CI runs the same target.
+
+Build both migrator distribution formats and verify a clean wheel installation embeds
+the byte-identical canonical SQL payload:
+
+```bash
+make test-packaging
 ```
 
 `make ci` additionally renders Kubernetes and runs every Terraform validation
@@ -136,17 +154,17 @@ CI runs:
 
 ```bash
 terraform fmt -check -recursive
-terraform init -backend=false
-terraform validate
+make terraform-validate
 tflint
 ```
 
-Run init/validate for each root module. Validation uses no live account and must not
+The canonical validation helper runs backend-disabled init/validate for each root and
+every committed `*.tftest.hcl` contract. Validation uses no live account and must not
 require a variable file. Provider installation can require network access even with
-backend initialization disabled. Plan tests, where present, use mocked or sandbox-only
-values and assert that dispatch defaults off, allowlists default empty, public storage
-is blocked, and existing Config/CloudTrail/VPC resources are not replaced in reference
-mode.
+backend initialization disabled. Plan tests use mocked or sandbox-only values and assert
+that dispatch defaults off, one-shot canary and automatic inventory gates remain
+separate, allowlists default empty, public storage is blocked, and existing
+Config/CloudTrail/VPC resources are not replaced in reference mode.
 
 Never upload a plan containing live identifiers as a public CI artifact.
 
@@ -155,6 +173,7 @@ Never upload a plan containing live identifiers as a public CI artifact.
 For every Kustomize root and Helm chart:
 
 - build or template with synthetic values;
+- render both supported Kubernetes 1.35 and 1.36 versions and include chart CRDs;
 - run lint;
 - validate rendered objects with kubeconform;
 - reject missing namespaces, mutable images, privileged defaults, broad RBAC, mounted
@@ -162,14 +181,19 @@ For every Kustomize root and Helm chart:
   limits; and
 - verify dispatch is disabled in default and example values.
 
-Custom-resource schemas should be supplied to kubeconform where available. A narrowly
-documented ignore for an unavailable custom schema must not hide built-in Kubernetes
-validation failures.
+CI exports every versioned custom-resource schema from the generated CRD and supplies it
+to kubeconform without `-ignore-missing-schemas`. Custom-resource objects therefore fail
+when their schema is absent or invalid. The CRD object itself is explicitly skipped by
+kubeconform because the upstream built-in registry omits that type; operator envtest
+installs the same CRD into a real API server and fails if the definition is rejected.
 
 ## Containers
 
 Build every Dockerfile from a committed, tracked-only context, then:
 
+- build natively on both AMD64 and ARM64 GitHub runners;
+- resolve every Terraform Lambda handler command inside its final image;
+- start the operator binary with its argument parser;
 - run component tests before publishing;
 - inspect the final user, entrypoint, capabilities, and included files;
 - reject secrets and package-manager caches;
@@ -181,15 +205,20 @@ Check the AWS publication helper without AWS credentials, a registry login, or i
 builds:
 
 ```bash
+bash -n terraform/aws/scripts/deploy.sh
 bash -n terraform/aws/scripts/build-images.sh
+bash -n terraform/aws/scripts/tests/deploy-test.sh
 bash -n terraform/aws/scripts/tests/build-images-test.sh
+terraform/aws/scripts/tests/deploy-test.sh
 terraform/aws/scripts/tests/build-images-test.sh
 ```
 
-The lightweight test supplies synthetic Terraform outputs and fake AWS/Docker commands.
-It verifies that dry run prints all seven component/platform mappings to stderr, leaves
-stdout empty, never calls AWS, and rejects an outside root, `latest`, and incomplete
-foundation outputs.
+The lightweight tests supply synthetic Terraform state/outputs and fake AWS/Docker
+commands. They verify ordered multi-file staged plans, expected account/Region injection,
+identity mismatch rejection, canary/activation/pause semantics, all seven
+component/platform mappings, empty dry-run stdout, no image-helper dry-run AWS calls, and
+rejection of unsafe arguments, outside roots, `latest`, and incomplete foundation
+outputs.
 
 The Terraform-owned publication helper must preserve its clean-source gate and assemble
 every Docker context from the selected committed source revision. Any explicit
@@ -200,7 +229,11 @@ If ShellCheck is installed, also run:
 
 ```bash
 shellcheck \
+  tools/test_postgresql.sh \
+  tools/test_migrator_package.sh \
+  terraform/aws/scripts/deploy.sh \
   terraform/aws/scripts/build-images.sh \
+  terraform/aws/scripts/tests/deploy-test.sh \
   terraform/aws/scripts/tests/build-images-test.sh
 ```
 
@@ -227,10 +260,13 @@ approval-protected, disabled unless configured, and must always run cleanup.
 
 ## CI map
 
-- core CI: Python, Go, schemas, and generated drift;
-- Terraform: formatting, backend-disabled initialization/validation, and TFLint;
-- Kubernetes: Kustomize, Helm, and kubeconform;
-- containers: clean builds and Trivy;
+- core CI: Python, clean package payloads, PostgreSQL integration, Go/Python boundary,
+  operator envtest, schemas, and generated drift;
+- Terraform: formatting, backend-disabled initialization/validation, contract tests, and
+  TFLint;
+- Kubernetes: Kustomize, Helm/CRD rendering for 1.35 and 1.36, and kubeconform;
+- containers: native AMD64/ARM64 clean builds, Lambda handler/operator startup checks,
+  and Trivy;
 - CodeQL: supported source languages;
 - supply chain: license/REUSE, gitleaks, pre-commit, and sanitizer; and
 - AWS sandbox: manual OIDC workflow with environment approval and unconditional cleanup.

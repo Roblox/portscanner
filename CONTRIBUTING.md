@@ -100,7 +100,7 @@ Kubernetes, image, license, or test checks merely to make a pull request green.
   exact path and SHA-256 publication-policy entry.
 - Pin or lock dependencies using the component's existing mechanism. After changing a
   Python Lambda dependency, update `uv.lock`, run
-  `uv run --frozen python tools/export_runtime_requirements.py`, and commit all five
+  `uv run --frozen python tools/export_runtime_requirements.py`, and commit all six
   reviewed hash exports together with the lock.
 - Request security-focused review for authorization, IAM, parsing, scanner arguments,
   source adapters, CI permissions, sanitizer exceptions, and evidence handling.

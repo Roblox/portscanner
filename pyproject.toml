@@ -97,7 +97,7 @@ ignore = [
 "examples/generate.py" = ["T201"]
 "schemas/generate.py" = ["T201"]
 "tools/sanitize.py" = ["PLR0911", "PLR0912", "PLR0917", "S603", "T201"]
-"tools/tests/**" = ["PT009", "S603", "S607"]
+"tools/tests/**" = ["PT009", "PT027", "S603", "S607"]
 
 [tool.mypy]
 python_version = "3.12"

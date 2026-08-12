@@ -20,6 +20,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -46,8 +47,11 @@ func main() {
 		scannerImage           string
 		scannerImagePullPolicy string
 		scannerServiceAccount  string
+		scannerNamespace       string
 		allowedCIDRsJSON       string
 		deniedCIDRsJSON        string
+		scannerMinRate         int
+		scannerMaxRate         int
 		resultBucket           string
 		resultPrefix           string
 		highPriorityClass      string
@@ -72,8 +76,11 @@ func main() {
 	flag.StringVar(&scannerImage, "scanner-image", "", "Scanner container image, including an immutable tag or digest.")
 	flag.StringVar(&scannerImagePullPolicy, "scanner-image-pull-policy", string(corev1.PullIfNotPresent), "Scanner image pull policy.")
 	flag.StringVar(&scannerServiceAccount, "scanner-service-account", "portscanner-scanner", "ServiceAccount used by scanner Jobs.")
+	flag.StringVar(&scannerNamespace, "scanner-namespace", "portscanner", "Single namespace watched for Scanner resources and Jobs.")
 	flag.StringVar(&allowedCIDRsJSON, "scanner-allowed-cidrs-json", "[]", "JSON array of deployment-authorized canonical IPv4 CIDRs.")
 	flag.StringVar(&deniedCIDRsJSON, "scanner-denied-cidrs-json", "[]", "JSON array of deployment-denied canonical IPv4 CIDRs.")
+	flag.IntVar(&scannerMinRate, "scanner-min-rate", 100, "Minimum Nmap probe rate for scanner Jobs.")
+	flag.IntVar(&scannerMaxRate, "scanner-max-rate", 500, "Maximum Nmap probe rate for scanner Jobs.")
 	flag.StringVar(&resultBucket, "result-bucket", "", "Result object-store bucket name.")
 	flag.StringVar(&resultPrefix, "result-prefix", "", "Result object key prefix.")
 	flag.StringVar(&highPriorityClass, "high-priority-class", "portscanner-high", "PriorityClass for high-priority requests.")
@@ -137,9 +144,12 @@ func main() {
 	jobConfig := scannercontroller.JobConfig{
 		ScannerImage:            scannerImage,
 		ScannerImagePullPolicy:  corev1.PullPolicy(scannerImagePullPolicy),
+		ScannerNamespace:        scannerNamespace,
 		ServiceAccountName:      scannerServiceAccount,
 		AllowedCIDRs:            allowedCIDRs,
 		DeniedCIDRs:             deniedCIDRs,
+		MinRate:                 scannerMinRate,
+		MaxRate:                 scannerMaxRate,
 		ResultBucket:            resultBucket,
 		ResultPrefix:            resultPrefix,
 		HighPriorityClassName:   highPriorityClass,
@@ -158,11 +168,15 @@ func main() {
 	}
 
 	manager, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                 scheme,
-		Metrics:                metricsserver.Options{BindAddress: metricsAddress},
-		HealthProbeBindAddress: healthAddress,
-		LeaderElection:         leaderElection,
-		LeaderElectionID:       leaderElectionID,
+		Scheme: scheme,
+		Cache: cache.Options{DefaultNamespaces: map[string]cache.Config{
+			scannerNamespace: {},
+		}},
+		Metrics:                 metricsserver.Options{BindAddress: metricsAddress},
+		HealthProbeBindAddress:  healthAddress,
+		LeaderElection:          leaderElection,
+		LeaderElectionID:        leaderElectionID,
+		LeaderElectionNamespace: scannerNamespace,
 	})
 	if err != nil {
 		exitWithError(fmt.Errorf("create manager: %w", err))

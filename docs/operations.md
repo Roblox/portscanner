@@ -66,6 +66,13 @@ must reach `iterator_age_alarm_threshold_seconds` (15 minutes by default) in two
 consecutive five-minute periods. AWS reports that metric in milliseconds; Terraform's
 input remains seconds.
 
+Committed outbox rows remain pending without TTL until S3 publication and both SQS sends
+succeed. Delivery changes the sparse-index entity and starts a seven-day TTL. A
+five-minute repair schedule queries the pending index whenever dispatch is enabled, so
+records older than DynamoDB Streams' 24-hour retention are still delivered. Treat
+repeated outbox Lambda errors as a durable poison-row or downstream outage, not as
+permission to delete the row.
+
 All of these alarms treat missing data as not breaching. This avoids false alarms for
 idle queues, disabled event sources, and functions with no invocations, but operators
 must separately detect missing expected schedules or traffic. Use the application
@@ -83,12 +90,18 @@ Grant and test any required publish/invoke permissions in the external integrati
 Route recovery notifications only when they are actionable; an `OK` transition does
 not prove that queued work was processed successfully.
 
+Finding delivery is a separate S3/SQS handoff. Follow
+[Integrating findings](integrating-findings.md) for its IAM, validation, idempotency, and
+message-deletion requirements.
+
 ### Interpret and extend coverage
 
 - Primary queue age means a producer/consumer imbalance, paused event source, failed
   downstream service, or deliberately unconsumed external handoff needs investigation.
 - A dead-letter message means retries were exhausted or EventBridge delivery failed;
-  inspect and preserve the message before redriving it.
+  inspect and preserve the message before redriving it. Deterministic generator,
+  result-parser, and target-projector contract rejections deliberately fail their SQS
+  item until this redrive policy quarantines it.
 - Lambda errors indicate failed invocations. Throttles indicate reserved concurrency or
   account concurrency prevented work from starting.
 - Outbox iterator age means DynamoDB stream records are not being drained promptly,
@@ -175,6 +188,15 @@ Disable dispatch first. Update the external authorization record, account/CIDR g
 and provider policy together. Reconcile queued work and discard anything outside the
 new boundary. Re-enable only after an ownership-gated canary.
 
+### Cluster-independent dispatch brake
+
+If an ordinary `pause` cannot refresh Helm because EKS is unreachable, run
+`terraform/aws/scripts/emergency-pause.sh <central-root>`. It validates STS and the
+state's account/Region, then disables exact AWS mappings and rules without a Terraform
+plan or Kubernetes connection. It does not stop active Jobs; follow the separately
+approved cluster or network/node-group stop procedure and reconcile with a normal pause
+plan after access is restored.
+
 ## Backup and recovery
 
 - Version object evidence and apply lifecycle retention deliberately.
@@ -182,21 +204,26 @@ new boundary. Re-enable only after an ownership-gated canary.
 - Keep Terraform state encrypted, locked, access-logged, and outside the repository.
 - Treat queue retention and dead-letter retention as part of the recovery-point
   objective.
+- Preserve pending outbox rows; they intentionally have no TTL before successful
+  delivery and are the repair source when stream records expire.
 - Restore into an isolated environment with dispatch disabled.
 - Reconcile provider snapshots after restore; do not blindly replay old scan work.
 
 ## Upgrades
 
-Follow the staged order in [aws-deployment.md](aws-deployment.md): foundations,
-expand-only migrations, tested image digests, disabled wiring, source activation,
+Follow the staged order in [aws-deployment.md](aws-deployment.md): foundation, tested
+image digests, disabled runtime wiring, expand-only migration/operator installation,
 bounded canary, then wider activation. Keep old readers and writers schema-compatible
 during rollback.
 
-The image helper accepts only central roots exposing `repository_urls` and
-`deployment_state`, and supports valid foundation, paused-runtime, migrated, installed,
-or active states so it can publish upgrade images. It explicitly rejects the member
-root. The migrate/install runner needs AWS CLI exec authentication, an explicit EKS
-installer access entry, and private API network reachability.
+The image helper accepts only central roots exposing `repository_urls`,
+`deployment_state`, and `workload_architecture`, rejects a requested build-architecture
+mismatch, and supports valid foundation, paused-runtime, migrated,
+operator-installed, active-canary, paused-canary, dispatch-only, and fully active states
+so it can publish upgrade images. It explicitly rejects the member root. The
+migrate/install runner needs AWS CLI exec authentication, an explicit EKS installer
+access entry, and network reachability through either the private EKS endpoint or the
+explicitly restricted public endpoint configuration.
 
 Generated manifests must be regenerated by the documented command and checked for drift
 in CI. Never hand-edit a generated artifact without updating its source.

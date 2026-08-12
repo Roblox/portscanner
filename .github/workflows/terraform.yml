@@ -7,6 +7,8 @@ on:
   pull_request:
     paths:
       - "**/*.tf"
+      - "**/*.tftest.hcl"
+      - "**/*.tfvars.example"
       - "**/.terraform.lock.hcl"
       - "terraform/aws/scripts/**/*.sh"
       - ".github/workflows/terraform.yml"
@@ -15,6 +17,8 @@ on:
       - main
     paths:
       - "**/*.tf"
+      - "**/*.tftest.hcl"
+      - "**/*.tfvars.example"
       - "**/.terraform.lock.hcl"
       - "terraform/aws/scripts/**/*.sh"
       - ".github/workflows/terraform.yml"
@@ -46,10 +50,10 @@ jobs:
           set -euo pipefail
           bash -n terraform/aws/scripts/deploy.sh
           bash -n terraform/aws/scripts/build-images.sh
-          bash terraform/aws/scripts/tests/build-images-test.sh
+          make terraform-script-tests
 
   validate:
-    name: Init and validate
+    name: Validate and test
     runs-on: ubuntu-latest
     env:
       AWS_EC2_METADATA_DISABLED: "true"
@@ -60,25 +64,8 @@ jobs:
         with:
           terraform_version: "1.7.4"
 
-      - name: Validate every Terraform directory
-        shell: bash
-        run: |
-          set -euo pipefail
-          declare -A roots=()
-          while IFS= read -r file; do
-            roots["$(dirname "${file}")"]=1
-          done < <(git ls-files '*.tf' '**/*.tf')
-
-          if [[ "${#roots[@]}" -eq 0 ]]; then
-            echo "No Terraform files are present."
-            exit 0
-          fi
-
-          for directory in "${!roots[@]}"; do
-            echo "Validating ${directory}"
-            terraform -chdir="${directory}" init -backend=false -input=false -no-color
-            terraform -chdir="${directory}" validate -no-color
-          done
+      - name: Validate roots and run module contract tests
+        run: make terraform-validate
 
   tflint:
     name: TFLint

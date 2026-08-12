@@ -206,6 +206,21 @@ locals {
         Resource = ["*"]
       },
       {
+        Sid    = "RepairInventoryOutbox"
+        Effect = "Allow"
+        Action = [
+          "dynamodb:GetItem",
+          "dynamodb:UpdateItem"
+        ]
+        Resource = [var.table_arns["inventory"]]
+      },
+      {
+        Sid      = "ListPendingInventoryOutbox"
+        Effect   = "Allow"
+        Action   = ["dynamodb:Query"]
+        Resource = ["${var.table_arns["inventory"]}/index/entity-event-index"]
+      },
+      {
         Sid    = "PublishTargetEventObject"
         Effect = "Allow"
         Action = [

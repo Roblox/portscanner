@@ -3,18 +3,13 @@ Copyright 2026 Roblox Corporation
 SPDX-License-Identifier: Apache-2.0
 */}}
 {{- $root := . -}}
-{{- $namespaces := .Values.scanner.namespaces -}}
-{{- if eq (len $namespaces) 0 -}}
-{{- $namespaces = list .Release.Namespace -}}
-{{- end -}}
-{{- range $namespace := $namespaces }}
 {{- if $root.Values.scanner.serviceAccount.create }}
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: {{ include "portscanner.scannerServiceAccountName" $root }}
-  namespace: {{ $namespace }}
+  namespace: {{ $root.Release.Namespace }}
   labels:
     {{- include "portscanner.labels" $root | nindent 4 }}
     app.kubernetes.io/component: scanner
@@ -30,7 +25,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
   name: {{ include "portscanner.fullname" $root }}-scanner
-  namespace: {{ $namespace }}
+  namespace: {{ $root.Release.Namespace }}
   labels:
     {{- include "portscanner.labels" $root | nindent 4 }}
     app.kubernetes.io/component: scanner
@@ -41,7 +36,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
   name: {{ include "portscanner.fullname" $root }}-scanner
-  namespace: {{ $namespace }}
+  namespace: {{ $root.Release.Namespace }}
   labels:
     {{- include "portscanner.labels" $root | nindent 4 }}
     app.kubernetes.io/component: scanner
@@ -52,6 +47,5 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: {{ include "portscanner.scannerServiceAccountName" $root }}
-    namespace: {{ $namespace }}
-{{- end }}
+    namespace: {{ $root.Release.Namespace }}
 {{- end }}

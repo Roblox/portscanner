@@ -100,43 +100,63 @@ jobs:
               "db/migrator/Dockerfile": (
                   "db/migrator/requirements-runtime.txt",
                   "portscanner-migrator",
+                  "act_migrator.handler.lambda_handler",
               ),
               "generator/Dockerfile": (
                   "generator/requirements-runtime.txt",
                   "portscanner-contracts portscanner-inventory portscanner-generator",
+                  "portscanner_generator.handler.lambda_handler",
               ),
               "inventory/Dockerfile": (
                   "inventory/requirements-runtime.txt",
                   "portscanner-contracts portscanner-inventory",
+                  "portscanner_inventory.handlers.snapshot.lambda_handler "
+                  "portscanner_inventory.handlers.signals.lambda_handler "
+                  "portscanner_inventory.handlers.outbox.lambda_handler "
+                  "portscanner_inventory.handlers.rescan.lambda_handler",
               ),
               "parser/Dockerfile": (
                   "parser/requirements-runtime.txt",
                   "portscanner-contracts portscanner-parser",
+                  "act_parser.target_handler.lambda_handler "
+                  "act_parser.handler.lambda_handler",
               ),
               "processor/Dockerfile": (
                   "processor/requirements-runtime.txt",
                   "portscanner-contracts portscanner-parser portscanner-processor",
+                  "act_processor.handler.lambda_handler",
               ),
               "scanner/nmap/Dockerfile": (
                   "scanner/nmap/requirements-runtime.txt",
                   "portscanner-contracts portscanner-scanner",
+                  "",
               ),
           }
+          architectures = (
+              ("amd64", "ubuntu-latest"),
+              ("arm64", "ubuntu-24.04-arm"),
+          )
           entries = []
           for index, dockerfile in enumerate(sorted(set(output.splitlines()))):
               if not re.fullmatch(r"[A-Za-z0-9_./-]+", dockerfile):
                   raise SystemExit(f"unsafe Dockerfile path: {dockerfile!r}")
               context = component_contexts.get(dockerfile, ".")
-              requirements, distributions = python_images.get(dockerfile, ("", ""))
-              entries.append(
-                  {
-                      "dockerfile": dockerfile,
-                      "context": context,
-                      "image": f"portscanner-ci:component-{index}",
-                      "runtime_requirements": requirements,
-                      "distributions": distributions,
-                  }
+              requirements, distributions, handlers = python_images.get(
+                  dockerfile, ("", "", "")
               )
+              for architecture, runner in architectures:
+                  entries.append(
+                      {
+                          "dockerfile": dockerfile,
+                          "context": context,
+                          "image": f"portscanner-ci:component-{index}-{architecture}",
+                          "runtime_requirements": requirements,
+                          "distributions": distributions,
+                          "handlers": handlers,
+                          "architecture": architecture,
+                          "runner": runner,
+                      }
+                  )
 
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
               handle.write(
@@ -148,14 +168,14 @@ jobs:
           PY
 
   build-and-scan:
-    name: Build and scan ${{ matrix.dockerfile }}
+    name: Build and scan ${{ matrix.dockerfile }} (${{ matrix.architecture }})
     needs:
       - discover
     if: needs.discover.outputs.present == 'true'
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.discover.outputs.matrix) }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7.0.1
 
@@ -176,6 +196,7 @@ jobs:
         if: matrix.runtime_requirements != ''
         env:
           DISTRIBUTIONS: ${{ matrix.distributions }}
+          HANDLERS: ${{ matrix.handlers }}
           IMAGE: ${{ matrix.image }}
         shell: bash
         run: |
@@ -184,7 +205,23 @@ jobs:
           for distribution in ${DISTRIBUTIONS}; do
             arguments+=(--distribution "${distribution}")
           done
+          for handler in ${HANDLERS}; do
+            arguments+=(--handler "${handler}")
+          done
           python3 tools/verify_python_image.py "${IMAGE}" "${arguments[@]}"
+
+      - name: Verify operator binary startup
+        if: matrix.dockerfile == 'operator/Dockerfile'
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: |
+          docker run --rm \
+            --network none \
+            --user 65532:65532 \
+            --read-only \
+            --cap-drop ALL \
+            --security-opt no-new-privileges=true \
+            "${IMAGE}" --help
 
       - name: Verify non-root scanner TCP connect scan
         if: matrix.dockerfile == 'scanner/nmap/Dockerfile'

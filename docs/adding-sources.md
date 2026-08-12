@@ -315,12 +315,13 @@ adapter or signal—selects:
 - `manual` (**Manual verification**) only for an explicit operator request;
 - priority class;
 - named scan profile;
-- global/source/destination rate class;
 - deadline;
 - retry limit; and
 - periodic reconciliation cadence.
 
-The adapter must never emit scanner flags or executable command fragments.
+The deployment-wide Nmap rates, active-Pod quota, and destination serialization remain
+central controls; the adapter must never emit scanner flags, executable command
+fragments, or a request to bypass them.
 
 Compute freshness from source observation and collection timestamps. If an item cannot
 be verified before its deadline, expire it without dispatch and rely on current

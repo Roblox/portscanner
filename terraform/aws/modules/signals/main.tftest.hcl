@@ -56,3 +56,31 @@ run "created_config_is_explicitly_regional" {
     error_message = "Create mode must authorize its exact account and aggregator region."
   }
 }
+
+run "disabled_cloudtrail_keeps_only_native_local_state_hint" {
+  command = plan
+
+  variables {
+    config_mode     = "disabled"
+    cloudtrail_mode = "disabled"
+  }
+
+  assert {
+    condition = (
+      length(aws_cloudtrail.management) == 0 &&
+      !contains(keys(aws_cloudwatch_event_rule.local), "cloudtrail") &&
+      contains(keys(aws_cloudwatch_event_rule.local), "state")
+    )
+    error_message = "Disabled CloudTrail mode must omit the trail and local API-call rule while retaining native state hints."
+  }
+}
+
+run "existing_cloudtrail_mode_requires_exact_arn" {
+  command = plan
+
+  variables {
+    cloudtrail_mode = "existing"
+  }
+
+  expect_failures = [terraform_data.signal_validation]
+}

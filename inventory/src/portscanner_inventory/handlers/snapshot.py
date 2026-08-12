@@ -7,6 +7,7 @@ import logging
 import os
 from collections.abc import Callable, Mapping
 from datetime import datetime
+from ipaddress import AddressValueError, IPv4Address
 from typing import Any
 
 from portscanner_inventory.aws.config_snapshot import ConfigSnapshotBackend
@@ -33,18 +34,29 @@ def reconcile_snapshot(
     ownership: Any,
     *,
     now: datetime,
+    target_public_ipv4: str | None = None,
+    require_exact_target: bool = False,
 ) -> dict[str, Any]:
     """Apply observed targets, then remove only directly revalidated absences."""
 
     batch = backend.collect()
+    if require_exact_target and not batch.complete:
+        raise ValueError("canary snapshot requires a complete inventory response")
     source = snapshot_source(batch.scope, now)
     counts = {
         action.value: 0 for action in ReconcileAction if action is not ReconcileAction.REVALIDATE
     }
+    selected = tuple(
+        target
+        for target in batch.targets
+        if target_public_ipv4 is None or target.public_ip == target_public_ipv4
+    )
+    if require_exact_target and len(selected) != 1:
+        raise ValueError("canary snapshot must resolve target_public_ipv4 to exactly one target")
+
     observed_ids: set[str] = set()
     revalidated = 0
-
-    for raw_target in batch.targets:
+    for raw_target in selected:
         target = (
             raw_target if raw_target.observed_at is not None else raw_target.with_observation(now)
         )
@@ -83,7 +95,7 @@ def reconcile_snapshot(
                 continue
         counts[result.action.value] += 1
 
-    if batch.complete:
+    if batch.complete and target_public_ipv4 is None:
         for current in state.list_current(batch.scope):
             if current.target_id in observed_ids:
                 continue
@@ -104,7 +116,7 @@ def reconcile_snapshot(
 
     summary = {
         "completion": batch.completion.value,
-        "targets": len(batch.targets),
+        "targets": len(selected),
         "pages": batch.pages,
         "revalidated": revalidated,
         **counts,
@@ -113,11 +125,47 @@ def reconcile_snapshot(
         LOGGER,
         "snapshot",
         completion=batch.completion.value,
-        targets=len(batch.targets),
+        targets=len(selected),
         pages=batch.pages,
         events=counts["added"] + counts["changed"] + counts["removed"],
     )
     return summary
+
+
+def _requested_target_public_ipv4(request: Mapping[str, Any]) -> str | None:
+    value = request.get("target_public_ipv4")
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError("target_public_ipv4 must be a canonical public IPv4 address")
+    try:
+        address = IPv4Address(value)
+    except AddressValueError as exc:
+        raise ValueError("target_public_ipv4 must be a canonical public IPv4 address") from exc
+    if str(address) != value or not address.is_global:
+        raise ValueError("target_public_ipv4 must be a canonical public IPv4 address")
+    return str(address)
+
+
+def _requested_account_id(request: Mapping[str, Any], settings: Settings) -> str:
+    value = request.get("account_id", settings.account_id)
+    if not isinstance(value, str) or value not in settings.authorized_account_ids:
+        raise ValueError("account_id is outside the configured authorized account scope")
+    return value
+
+
+def _requested_region(
+    request: Mapping[str, Any],
+    settings: Settings,
+    *,
+    field: str = "region",
+) -> str | None:
+    value = request.get(field)
+    if value is None:
+        return None
+    if not isinstance(value, str) or value not in settings.regions:
+        raise ValueError(f"{field} is outside the configured snapshot Region scope")
+    return value
 
 
 class _Runtime:
@@ -146,15 +194,34 @@ class _Runtime:
 
     def process(self, request: Mapping[str, Any]) -> list[dict[str, Any]]:
         now = utc_now()
+        target_public_ipv4 = _requested_target_public_ipv4(request)
+        account_id = _requested_account_id(request, self.settings)
+        requested_region = _requested_region(request, self.settings)
+        if self.settings.canary_mode and (
+            target_public_ipv4 is None or "account_id" not in request or requested_region is None
+        ):
+            raise ValueError("canary snapshot requires account_id, region, and target_public_ipv4")
         backend: ConfigSnapshotBackend | Ec2SnapshotBackend
         if self.settings.snapshot_backend == "config":
-            region = str(request.get("region") or os.environ.get("AWS_REGION") or "us-east-1")
-            client = self.session.client("config", region_name=region)
+            client_region = os.environ.get("AWS_REGION") or "us-east-1"
+            legacy_target_region = _requested_region(
+                request,
+                self.settings,
+                field="target_region",
+            )
+            if (
+                requested_region is not None
+                and legacy_target_region is not None
+                and requested_region != legacy_target_region
+            ):
+                raise ValueError("region and target_region must identify the same target Region")
+            target_region = requested_region or legacy_target_region
+            client = self.session.client("config", region_name=client_region)
             scope = SnapshotScope(
                 source="aws-config",
                 name=self.settings.config_aggregator_name,
-                account_id=str(request["account_id"]) if request.get("account_id") else None,
-                region=str(request["target_region"]) if request.get("target_region") else None,
+                account_id=account_id,
+                region=target_region,
             )
             backend = ConfigSnapshotBackend(
                 client,
@@ -162,11 +229,18 @@ class _Runtime:
                 scope=scope,
                 allowed_tag_keys=self.settings.allowed_tag_keys,
             )
-            return [reconcile_snapshot(backend, self.state, self.ownership, now=now)]
+            return [
+                reconcile_snapshot(
+                    backend,
+                    self.state,
+                    self.ownership,
+                    now=now,
+                    target_public_ipv4=target_public_ipv4,
+                    require_exact_target=self.settings.canary_mode,
+                )
+            ]
 
-        account_id = str(request.get("account_id") or self.settings.account_id or "")
-        requested_region = request.get("region")
-        regions = (str(requested_region),) if requested_region else self.settings.regions
+        regions = (requested_region,) if requested_region else self.settings.regions
         summaries = []
         for region in regions:
             client = self.factory.client("ec2", account_id=account_id, region=region)
@@ -176,7 +250,16 @@ class _Runtime:
                 region=region,
                 allowed_tag_keys=self.settings.allowed_tag_keys,
             )
-            summaries.append(reconcile_snapshot(backend, self.state, self.ownership, now=now))
+            summaries.append(
+                reconcile_snapshot(
+                    backend,
+                    self.state,
+                    self.ownership,
+                    now=now,
+                    target_public_ipv4=target_public_ipv4,
+                    require_exact_target=self.settings.canary_mode,
+                )
+            )
         return summaries
 
 

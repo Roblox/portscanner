@@ -35,6 +35,7 @@ synthetic_aws_resource_ids = [
   "eni-bbbbbbbb",
   "i-0123456789abcdef0",
   "i-bbbbbbbb",
+  "nat-00000000000000001",
   "rtb-00000000000000001",
   "rtb-00000000000000002",
   "rtb-00000000000000003",

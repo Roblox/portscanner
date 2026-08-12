@@ -25,6 +25,12 @@ variable "untagged_image_expiration_days" {
   }
 }
 
+variable "force_delete" {
+  description = "Delete repository images during Terraform destroy. Enable only for a disposable evaluation."
+  type        = bool
+  default     = false
+}
+
 data "aws_caller_identity" "current" {}
 data "aws_partition" "current" {}
 data "aws_region" "current" {}
@@ -53,7 +59,7 @@ resource "aws_ecr_repository" "this" {
 
   name                 = "${var.name_prefix}/${each.key}"
   image_tag_mutability = "IMMUTABLE"
-  force_delete         = false
+  force_delete         = var.force_delete
 
   encryption_configuration {
     encryption_type = "AES256"

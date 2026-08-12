@@ -59,6 +59,45 @@ run "reject_install_without_explicit_installer" {
   expect_failures = [terraform_data.operator_validation]
 }
 
+run "reject_public_endpoint_without_cidrs" {
+  command = plan
+
+  variables {
+    endpoint_public_access = true
+  }
+
+  expect_failures = [terraform_data.node_validation]
+}
+
+run "reject_unrestricted_public_endpoint" {
+  command = plan
+
+  variables {
+    endpoint_public_access = true
+    public_access_cidrs    = ["0.0.0.0/0"]
+  }
+
+  expect_failures = [var.public_access_cidrs]
+}
+
+run "create_restricted_public_endpoint" {
+  command = plan
+
+  variables {
+    endpoint_public_access = true
+    public_access_cidrs    = ["198.51.100.24/32"]
+  }
+
+  assert {
+    condition = (
+      aws_eks_cluster.this.vpc_config[0].endpoint_private_access &&
+      aws_eks_cluster.this.vpc_config[0].endpoint_public_access &&
+      toset(aws_eks_cluster.this.vpc_config[0].public_access_cidrs) == toset(["198.51.100.24/32"])
+    )
+    error_message = "Evaluation public access must retain private access and use only the configured restricted CIDRs."
+  }
+}
+
 run "create_explicit_cluster_admin_path" {
   command = plan
 
@@ -99,4 +138,37 @@ run "create_explicit_cluster_admin_path" {
     )
     error_message = "The selected interface endpoint security group must allow EKS workload TLS."
   }
+
+  assert {
+    condition = (
+      strcontains(helm_release.operator[0].values[0], "maxConcurrentReconciles") &&
+      strcontains(helm_release.operator[0].values[0], "maxConcurrentPods") &&
+      strcontains(helm_release.operator[0].values[0], "maxJobs") &&
+      strcontains(helm_release.operator[0].values[0], "minRate") &&
+      strcontains(helm_release.operator[0].values[0], "maxRate")
+    )
+    error_message = "The Helm release must carry explicit scanner concurrency and rate policy."
+  }
+}
+
+run "reject_job_quota_below_active_pod_quota" {
+  command = plan
+
+  variables {
+    scanner_max_concurrent_pods = 5
+    scanner_max_jobs            = 4
+  }
+
+  expect_failures = [terraform_data.operator_validation]
+}
+
+run "reject_inverted_scanner_rate_range" {
+  command = plan
+
+  variables {
+    scanner_min_rate = 501
+    scanner_max_rate = 500
+  }
+
+  expect_failures = [terraform_data.operator_validation]
 }

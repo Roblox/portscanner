@@ -10,6 +10,12 @@ on:
       - "**/*.yml"
       - "**/Chart.yaml"
       - "**/values.yaml"
+      - "**/*.tpl"
+      - "tools/export_crd_schemas.py"
+      - "tools/tests/test_export_crd_schemas.py"
+      - "generator/pyproject.toml"
+      - "pyproject.toml"
+      - "uv.lock"
       - ".github/workflows/kubernetes.yml"
   push:
     branches:
@@ -17,6 +23,11 @@ on:
     paths:
       - "operator/config/**"
       - "operator/chart/**"
+      - "tools/export_crd_schemas.py"
+      - "tools/tests/test_export_crd_schemas.py"
+      - "generator/pyproject.toml"
+      - "pyproject.toml"
+      - "uv.lock"
       - ".github/workflows/kubernetes.yml"
 
 permissions:
@@ -38,6 +49,15 @@ jobs:
           go-version: "1.26.x"
           cache: false
 
+      - uses: actions/setup-python@v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install locked CRD schema dependencies
+        run: |
+          python -m pip install --disable-pip-version-check "uv==0.11.30"
+          uv sync --frozen --package portscanner-generator
+
       - name: Install manifest tools
         shell: bash
         run: |
@@ -45,6 +65,17 @@ jobs:
           go install sigs.k8s.io/kustomize/kustomize/v5@v5.8.1
           go install helm.sh/helm/v3/cmd/helm@v3.20.1
           go install github.com/yannh/kubeconform/cmd/kubeconform@v0.8.0
+
+      - name: Export custom resource schemas
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t crds < <(git ls-files 'operator/config/crd/bases/*.yaml')
+          [[ "${#crds[@]}" -gt 0 ]]
+          uv run --frozen --package portscanner-generator \
+            python tools/export_crd_schemas.py \
+            --output-directory "${RUNNER_TEMP}/crd-schemas" \
+            "${crds[@]}"
 
       - name: Build and validate Kustomize roots
         shell: bash
@@ -56,15 +87,42 @@ jobs:
             rendered="${RUNNER_TEMP}/kustomize-${count}.yaml"
             echo "Building ${directory}"
             kustomize build "${directory}" > "${rendered}"
-            kubeconform \
-              -strict \
-              -summary \
-              -ignore-missing-schemas \
-              "${rendered}"
+            for version in 1.35.0 1.36.0; do
+              kubeconform \
+                -strict \
+                -summary \
+                -skip CustomResourceDefinition \
+                -kubernetes-version "${version}" \
+                -schema-location default \
+                -schema-location "${RUNNER_TEMP}/crd-schemas/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" \
+                "${rendered}"
+            done
             count=$((count + 1))
           done < <(git ls-files 'kustomization.yaml' '**/kustomization.yaml')
           if [[ "${count}" -eq 0 ]]; then
             echo "No Kustomize roots are present."
+          fi
+
+      - name: Validate custom resource samples
+        shell: bash
+        run: |
+          set -euo pipefail
+          count=0
+          while IFS= read -r sample; do
+            for version in 1.35.0 1.36.0; do
+              kubeconform \
+                -strict \
+                -summary \
+                -kubernetes-version "${version}" \
+                -schema-location default \
+                -schema-location "${RUNNER_TEMP}/crd-schemas/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" \
+                "${sample}"
+            done
+            count=$((count + 1))
+          done < <(git ls-files 'operator/config/samples/*.yaml')
+          if [[ "${count}" -eq 0 ]]; then
+            echo "No custom resource samples are present."
+            exit 1
           fi
 
       - name: Lint, render, and validate Helm charts
@@ -74,16 +132,23 @@ jobs:
           count=0
           while IFS= read -r chart; do
             directory="$(dirname "${chart}")"
-            rendered="${RUNNER_TEMP}/helm-${count}.yaml"
-            echo "Rendering ${directory}"
-            helm lint "${directory}" --kube-version 1.36.0
-            helm template "portscanner-ci-${count}" "${directory}" \
-              --kube-version 1.36.0 > "${rendered}"
-            kubeconform \
-              -strict \
-              -summary \
-              -ignore-missing-schemas \
-              "${rendered}"
+            for version in 1.35.0 1.36.0; do
+              rendered="${RUNNER_TEMP}/helm-${count}-${version}.yaml"
+              release="portscanner-ci-${count}-${version//./-}"
+              echo "Rendering ${directory} for Kubernetes ${version}"
+              helm lint "${directory}" --kube-version "${version}"
+              helm template "${release}" "${directory}" \
+                --include-crds \
+                --kube-version "${version}" > "${rendered}"
+              kubeconform \
+                -strict \
+                -summary \
+                -skip CustomResourceDefinition \
+                -kubernetes-version "${version}" \
+                -schema-location default \
+                -schema-location "${RUNNER_TEMP}/crd-schemas/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" \
+                "${rendered}"
+            done
             count=$((count + 1))
           done < <(git ls-files 'Chart.yaml' '**/Chart.yaml')
           if [[ "${count}" -eq 0 ]]; then

@@ -118,6 +118,32 @@ variable "existing_private_subnet_egress_mode" {
   }
 }
 
+variable "scanner_public_egress_required" {
+  description = "Reject endpoint-only existing subnets when scanner dispatch is enabled."
+  type        = bool
+  default     = false
+}
+
+variable "existing_public_nat_gateway_ids" {
+  description = "Public NAT gateways that every scanner subnet default route must use when existing-VPC scanner dispatch is enabled."
+  type        = set(string)
+  default     = []
+
+  validation {
+    condition = alltrue([
+      for nat_gateway_id in var.existing_public_nat_gateway_ids :
+      can(regex("^nat-[0-9a-f]+$", nat_gateway_id))
+    ])
+    error_message = "existing_public_nat_gateway_ids must contain valid NAT gateway IDs."
+  }
+}
+
+variable "existing_transit_gateway_public_egress_acknowledged" {
+  description = "Explicit operator attestation that selected TGW default routes are active/non-blackhole and reach reviewed public egress for scanner traffic."
+  type        = bool
+  default     = false
+}
+
 variable "existing_private_vpc_endpoint_ids" {
   description = "Existing VPC endpoint IDs keyed by required AWS service when existing_private_subnet_egress_mode is vpc_endpoints."
   type        = map(string)
@@ -187,6 +213,12 @@ data "aws_vpc_endpoint" "existing_private" {
   id = each.value
 }
 
+data "aws_nat_gateway" "existing_public" {
+  for_each = !var.create_vpc && var.existing_private_subnet_egress_mode == "nat_gateway" ? var.existing_public_nat_gateway_ids : toset([])
+
+  id = each.value
+}
+
 locals {
   selected_azs = var.create_vpc ? slice(
     var.availability_zones != null ? var.availability_zones : data.aws_availability_zones.available[0].names,
@@ -250,6 +282,13 @@ locals {
   existing_private_route_table_ids = toset([
     for table in values(data.aws_route_table.existing_private) : table.id
   ])
+  existing_private_route_nat_gateway_ids = toset(flatten([
+    for table in values(data.aws_route_table.existing_private) : [
+      for route in table.routes : route.nat_gateway_id
+      if route.cidr_block == "0.0.0.0/0" &&
+      try(startswith(route.nat_gateway_id, "nat-"), false)
+    ]
+  ]))
   existing_interface_endpoint_security_group_ids = toset(
     values(var.existing_private_interface_endpoint_security_group_ids)
   )
@@ -289,6 +328,44 @@ resource "terraform_data" "network_validation" {
     precondition {
       condition     = var.create_vpc || var.existing_private_subnet_egress_mode != null
       error_message = "Existing mode requires existing_private_subnet_egress_mode to declare NAT gateway, transit gateway, or verified VPC endpoint egress."
+    }
+
+    precondition {
+      condition = (
+        !var.scanner_public_egress_required ||
+        var.create_vpc ||
+        try(contains(["nat_gateway", "transit_gateway"], var.existing_private_subnet_egress_mode), false)
+      )
+      error_message = "Scanner dispatch requires NAT gateway or transit gateway public egress; VPC endpoints alone cannot reach public scan targets."
+    }
+
+    precondition {
+      condition = (
+        !var.scanner_public_egress_required ||
+        var.create_vpc ||
+        var.existing_private_subnet_egress_mode != "nat_gateway" ||
+        (
+          length(var.existing_public_nat_gateway_ids) > 0 &&
+          local.existing_private_route_nat_gateway_ids == var.existing_public_nat_gateway_ids &&
+          alltrue([
+            for gateway in values(data.aws_nat_gateway.existing_public) :
+            gateway.vpc_id == var.existing_vpc_id &&
+            gateway.state == "available" &&
+            gateway.connectivity_type == "public"
+          ])
+        )
+      )
+      error_message = "NAT scanner egress requires every private default-route NAT ID to be declared and verified as an available public NAT gateway in the selected VPC."
+    }
+
+    precondition {
+      condition = (
+        !var.scanner_public_egress_required ||
+        var.create_vpc ||
+        var.existing_private_subnet_egress_mode != "transit_gateway" ||
+        var.existing_transit_gateway_public_egress_acknowledged
+      )
+      error_message = "Transit-gateway scanner egress requires an explicit reviewed acknowledgement that the TGW path reaches public egress."
     }
 
     precondition {
@@ -416,7 +493,7 @@ resource "terraform_data" "network_validation" {
           anytrue([
             for route in table.routes :
             route.cidr_block == "0.0.0.0/0" &&
-            route.state == "active" && (
+            (
               var.existing_private_subnet_egress_mode == "nat_gateway" ?
               try(startswith(route.nat_gateway_id, "nat-"), false) :
               try(startswith(route.transit_gateway_id, "tgw-"), false)
@@ -692,6 +769,11 @@ output "private_subnet_ids" {
 
 output "isolated_subnet_ids" {
   value = var.create_vpc ? values(aws_subnet.isolated)[*].id : var.existing_isolated_subnet_ids
+}
+
+output "created_nat_public_ips" {
+  description = "Stable scanner egress addresses for a created VPC. Empty for an existing VPC whose egress is externally managed."
+  value       = sort([for address in values(aws_eip.nat) : address.public_ip])
 }
 
 output "lambda_runtime_security_group_id" {

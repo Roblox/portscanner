@@ -79,9 +79,17 @@ the release.
 
 ### Excessive traffic
 
-Global, source, destination, and per-Job budgets limit packet rate and concurrency.
-Deadlines, timeouts, maximum Target counts, disruption windows, and an emergency
-dispatch-off switch bound impact.
+Every scanner Job receives reviewed minimum/maximum Nmap rates. A PriorityClass-scoped
+ResourceQuota hard-caps active scanner Pods, so aggregate configured throughput is at
+most `scanner_max_concurrent_pods × scanner_max_rate`; required cross-namespace
+anti-affinity allows only one active Pod for an opaque hash of a public destination. A
+second object-count quota caps active, pending, and retained scanner Jobs at
+`scanner_max_jobs`. The operator cache, RBAC, generator, Jobs, and both quotas are
+restricted to one dedicated release namespace so another namespace cannot multiply the
+limit.
+Deadlines, timeouts, the exact-one evaluation gate, and an AWS-only emergency
+dispatch-off switch further bound impact. The first release does not claim an
+independent per-source packet token bucket.
 
 ### Malicious scanner output
 

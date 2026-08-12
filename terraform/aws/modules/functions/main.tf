@@ -27,7 +27,19 @@ variable "run_migration" {
 }
 
 variable "enable_event_dispatch" {
-  description = "Enable queue, stream, and schedule event sources."
+  description = "Enable queue and stream event sources."
+  type        = bool
+  default     = false
+}
+
+variable "enable_automatic_inventory" {
+  description = "Enable recurring inventory and repair schedules after queue and stream dispatch is active."
+  type        = bool
+  default     = false
+}
+
+variable "canary_mode" {
+  description = "Require the snapshot Lambda to accept only explicit one-target canary invocations."
   type        = bool
   default     = false
 }
@@ -135,7 +147,7 @@ variable "snapshot_account_id" {
 }
 
 variable "snapshot_regions" {
-  description = "Regions collected by the direct EC2 snapshot backend."
+  description = "Authorized target Regions; direct EC2 snapshots collect this complete list."
   type        = list(string)
 }
 
@@ -149,6 +161,18 @@ variable "target_event_prefix" {
   description = "Immutable target-event object prefix."
   type        = string
   default     = "target-events/aws"
+}
+
+variable "allowed_target_cidrs" {
+  description = "Optional deployment CIDR allowlist enforced by the generator before Scanner creation."
+  type        = set(string)
+  default     = []
+}
+
+variable "denied_target_cidrs" {
+  description = "Deployment CIDR denylist enforced by the generator before the allowlist."
+  type        = set(string)
+  default     = []
 }
 
 variable "authorized_account_ids" {
@@ -327,34 +351,40 @@ locals {
   })
 
   inventory_environment = merge({
-    INVENTORY_TABLE     = var.table_names["inventory"]
-    TARGET_EVENT_BUCKET = var.bucket_names["events"]
-    TARGET_EVENT_PREFIX = var.target_event_prefix
-    SNAPSHOT_BACKEND    = var.snapshot_backend
-    AWS_ACCOUNT_ID      = var.snapshot_account_id
-    ALLOWED_TAG_KEYS    = join(",", sort(tolist(var.allowed_tag_keys)))
+    INVENTORY_TABLE        = var.table_names["inventory"]
+    TARGET_EVENT_BUCKET    = var.bucket_names["events"]
+    TARGET_EVENT_PREFIX    = var.target_event_prefix
+    SNAPSHOT_BACKEND       = var.snapshot_backend
+    AWS_ACCOUNT_ID         = var.snapshot_account_id
+    AWS_REGIONS            = join(",", var.snapshot_regions)
+    AUTHORIZED_ACCOUNT_IDS = join(",", sort(tolist(var.authorized_account_ids)))
+    ALLOWED_TAG_KEYS       = join(",", sort(tolist(var.allowed_tag_keys)))
   }, local.member_discovery_environment)
 
   snapshot_environment = merge(
     local.inventory_environment,
+    {
+      CANARY_MODE = tostring(var.canary_mode)
+    },
     var.snapshot_backend == "config" ? {
       CONFIG_AGGREGATOR_NAME = var.config_aggregator_name
       } : {
       AWS_ACCOUNT_ID = var.snapshot_account_id
-      AWS_REGIONS    = join(",", var.snapshot_regions)
     }
   )
 
   generator_environment = merge(local.inventory_environment, {
-    TARGET_EVENT_BUCKET = var.bucket_names["events"]
-    TARGET_EVENT_PREFIX = var.target_event_prefix
-    IDEMPOTENCY_TABLE   = var.table_names["dispatch"]
-    INVENTORY_TABLE     = var.table_names["inventory"]
-    EKS_CLUSTER_NAME    = var.eks_cluster_name
-    K8S_NAMESPACE       = var.eks_namespace
-    K8S_API_GROUP       = "scanning.portscanner.io"
-    K8S_API_VERSION     = "v1alpha1"
-    K8S_CRD_PLURAL      = "scanners"
+    TARGET_EVENT_BUCKET  = var.bucket_names["events"]
+    TARGET_EVENT_PREFIX  = var.target_event_prefix
+    IDEMPOTENCY_TABLE    = var.table_names["dispatch"]
+    INVENTORY_TABLE      = var.table_names["inventory"]
+    EKS_CLUSTER_NAME     = var.eks_cluster_name
+    K8S_NAMESPACE        = var.eks_namespace
+    K8S_API_GROUP        = "scanning.portscanner.io"
+    K8S_API_VERSION      = "v1alpha1"
+    K8S_CRD_PLURAL       = "scanners"
+    ALLOWED_TARGET_CIDRS = join(",", sort(tolist(var.allowed_target_cidrs)))
+    DENIED_TARGET_CIDRS  = join(",", sort(tolist(var.denied_target_cidrs)))
   })
 
   function_definitions = {
@@ -381,9 +411,11 @@ locals {
       timeout = var.lambda_timeout_seconds
       memory  = var.memory_size_mb
       environment = merge(local.inventory_environment, {
-        PRIORITY_QUEUE_URL     = var.queue_urls["priority"]
-        COVERAGE_QUEUE_URL     = var.queue_urls["coverage"]
-        TARGET_EVENT_QUEUE_URL = var.queue_urls["target-event"]
+        PRIORITY_QUEUE_URL       = var.queue_urls["priority"]
+        COVERAGE_QUEUE_URL       = var.queue_urls["coverage"]
+        TARGET_EVENT_QUEUE_URL   = var.queue_urls["target-event"]
+        OUTBOX_TTL_SECONDS       = "604800"
+        OUTBOX_REPLAY_BATCH_SIZE = "100"
       })
     }
     rescan = {
@@ -486,6 +518,7 @@ locals {
       queue    = "result"
     }
   }
+  automatic_sqs_mappings = toset(["signals", "generator_coverage"])
 
   snapshot_scope_account_ids = length(var.authorized_account_ids) > 0 ? var.authorized_account_ids : toset([
     var.snapshot_account_id
@@ -495,6 +528,7 @@ locals {
     "snapshot-${account_id}" => {
       expression = var.snapshot_schedule_expression
       function   = "snapshot"
+      gate       = "automatic"
       input = {
         account_id = account_id
       }
@@ -504,12 +538,22 @@ locals {
     rescan = {
       expression = var.rescan_schedule_expression
       function   = "rescan"
+      gate       = "automatic"
       input      = null
     }
     processor = {
       expression = var.processor_schedule_expression
       function   = "processor"
+      gate       = "automatic"
       input      = null
+    }
+    "outbox-replay" = {
+      expression = "rate(5 minutes)"
+      function   = "outbox"
+      gate       = "dispatch"
+      input = {
+        mode = "replay-outbox"
+      }
     }
   })
 
@@ -538,6 +582,20 @@ resource "terraform_data" "runtime_validation" {
     precondition {
       condition     = !var.enable_event_dispatch || (var.deploy_runtime && var.run_migration && length(var.authorized_account_ids) > 0)
       error_message = "enable_event_dispatch requires deployed runtime, completed migration, and an explicit authorized account scope."
+    }
+
+    precondition {
+      condition     = !var.enable_automatic_inventory || var.enable_event_dispatch
+      error_message = "enable_automatic_inventory requires enable_event_dispatch."
+    }
+
+    precondition {
+      condition = !var.canary_mode || (
+        var.deploy_runtime &&
+        var.run_migration &&
+        !var.enable_automatic_inventory
+      )
+      error_message = "canary_mode requires migrated runtime and automatic inventory disabled."
     }
 
     precondition {
@@ -724,8 +782,10 @@ resource "aws_lambda_event_source_mapping" "sqs" {
 
   event_source_arn = var.queue_arns[each.value.queue]
   function_name    = aws_lambda_function.this[each.value.function].arn
-  enabled          = var.enable_event_dispatch
-  batch_size       = 5
+  enabled = contains(local.automatic_sqs_mappings, each.key) ? (
+    var.enable_automatic_inventory
+  ) : var.enable_event_dispatch
+  batch_size = 5
 
   function_response_types = ["ReportBatchItemFailures"]
 
@@ -742,6 +802,21 @@ resource "aws_lambda_event_source_mapping" "outbox" {
   batch_size        = 10
 
   function_response_types = ["ReportBatchItemFailures"]
+
+  filter_criteria {
+    filter {
+      pattern = jsonencode({
+        eventName = ["INSERT"]
+        dynamodb = {
+          NewImage = {
+            entity = {
+              S = ["outbox"]
+            }
+          }
+        }
+      })
+    }
+  }
 
   depends_on = [aws_lambda_invocation.migration]
 }
@@ -781,7 +856,9 @@ resource "aws_cloudwatch_event_rule" "schedule" {
   name                = "${var.name_prefix}-${each.key}-schedule"
   description         = "Conservative ${each.key} schedule"
   schedule_expression = each.value.expression
-  state               = var.enable_event_dispatch ? "ENABLED" : "DISABLED"
+  state = each.value.gate == "dispatch" ? (
+    var.enable_event_dispatch ? "ENABLED" : "DISABLED"
+  ) : (var.enable_automatic_inventory ? "ENABLED" : "DISABLED")
 }
 
 resource "aws_cloudwatch_event_target" "schedule" {
@@ -808,6 +885,24 @@ resource "aws_lambda_permission" "schedule" {
 
 output "function_arns" {
   value = { for name, function in aws_lambda_function.this : name => function.arn }
+}
+
+output "event_source_mapping_uuids" {
+  description = "Exact Lambda mapping UUIDs managed by this module for AWS-only emergency pause."
+  value = concat(
+    [for mapping in values(aws_lambda_event_source_mapping.sqs) : mapping.uuid],
+    [for mapping in aws_lambda_event_source_mapping.outbox : mapping.uuid]
+  )
+}
+
+output "schedule_rule_controls" {
+  description = "Exact EventBridge schedule controls managed by this module."
+  value = [
+    for rule in values(aws_cloudwatch_event_rule.schedule) : {
+      name           = rule.name
+      event_bus_name = "default"
+    }
+  ]
 }
 
 output "migration_token" {

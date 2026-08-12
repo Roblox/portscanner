@@ -49,11 +49,19 @@ def migration_set_checksum(directory: str | Path) -> str:
     root = Path(directory)
     if not root.is_dir():
         raise MigrationError(f"migration directory does not exist: {root}")
+    discover_migrations(root)
     entries = sorted(root.iterdir(), key=lambda path: path.name.encode("utf-8"))
     symlinks = [path.name for path in entries if path.is_symlink()]
     if symlinks:
         raise MigrationError(f"migration directory contains a symlink: {symlinks[0]}")
-    paths = [path for path in entries if path.is_file()]
+    invalid = [
+        path.name
+        for path in entries
+        if not path.is_file() or _MIGRATION_FILE.fullmatch(path.name) is None
+    ]
+    if invalid:
+        raise MigrationError(f"invalid migration artifact: {invalid[0]}")
+    paths = entries
     if not paths:
         raise MigrationError(f"no migration files found in {root}")
 
@@ -79,12 +87,10 @@ def discover_migrations(directory: str | Path) -> list[Migration]:
         if path.is_symlink():
             raise MigrationError(f"migration directory contains a symlink: {path.name}")
         if not path.is_file():
-            continue
+            raise MigrationError(f"invalid migration artifact: {path.name}")
         match = _MIGRATION_FILE.fullmatch(path.name)
-        if path.suffix == ".sql" and match is None:
-            raise MigrationError(f"invalid migration filename: {path.name}")
         if match is None:
-            continue
+            raise MigrationError(f"invalid migration filename: {path.name}")
         version = match.group("version")
         name = match.group("name")
         direction = match.group("direction")
@@ -94,7 +100,12 @@ def discover_migrations(directory: str | Path) -> list[Migration]:
         slot[direction] = (name, path.read_bytes())
 
     migrations: list[Migration] = []
-    for version in sorted(pairs):
+    versions = sorted(pairs)
+    expected_versions = [f"{index:06d}" for index in range(1, len(versions) + 1)]
+    if versions != expected_versions:
+        raise MigrationError("migration versions must be contiguous starting at 000001")
+
+    for version in versions:
         pair = pairs[version]
         if set(pair) != {"up", "down"}:
             missing = "down" if "up" in pair else "up"

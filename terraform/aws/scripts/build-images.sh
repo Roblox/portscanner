@@ -54,8 +54,12 @@ esac
 [[ "${ROOT_ARG}" != -* ]] || die "Terraform root must not begin with '-'"
 
 case "${ARCHITECTURE}" in
-  arm64) PLATFORM="linux/arm64" ;;
-  x86_64) PLATFORM="linux/amd64" ;;
+  arm64)
+    PLATFORM="linux/arm64"
+    ;;
+  x86_64)
+    PLATFORM="linux/amd64"
+    ;;
   *) die "architecture must be arm64 or x86_64" ;;
 esac
 
@@ -168,6 +172,24 @@ fi
 if ! DEPLOYMENT_STATE_JSON="$(terraform "-chdir=${ROOT}" output -json deployment_state)"; then
   die "deployment_state output is unavailable; apply this central root first"
 fi
+if ! WORKLOAD_ARCHITECTURE_JSON="$(terraform "-chdir=${ROOT}" output -json workload_architecture)"; then
+  die "workload_architecture output is unavailable; apply this central root first"
+fi
+if ! jq -e '
+  type == "object"
+  and keys == ["architecture", "node_ami_type", "node_instance_types"]
+  and (.architecture == "arm64" or .architecture == "x86_64")
+  and (.node_ami_type | type == "string" and length > 0)
+  and (.node_instance_types | type == "array" and length > 0 and all(.[]; type == "string" and length > 0))
+' \
+  <<<"${WORKLOAD_ARCHITECTURE_JSON}" >/dev/null; then
+  die "workload_architecture output is malformed"
+fi
+APPLIED_ARCHITECTURE="$(jq -r .architecture <<<"${WORKLOAD_ARCHITECTURE_JSON}")"
+[[ "${APPLIED_ARCHITECTURE}" == "${ARCHITECTURE}" ]] ||
+  die "requested image architecture ${ARCHITECTURE} does not match applied workload_architecture ${APPLIED_ARCHITECTURE}"
+APPLIED_NODE_AMI_TYPE="$(jq -r .node_ami_type <<<"${WORKLOAD_ARCHITECTURE_JSON}")"
+APPLIED_NODE_INSTANCE_TYPES="$(jq -c .node_instance_types <<<"${WORKLOAD_ARCHITECTURE_JSON}")"
 
 EXPECTED_COMPONENTS_JSON='["generator","inventory","migrator","operator","parser","processor","scanner"]'
 if ! jq -e --argjson expected "${EXPECTED_COMPONENTS_JSON}" \
@@ -177,16 +199,21 @@ if ! jq -e --argjson expected "${EXPECTED_COMPONENTS_JSON}" \
 fi
 if ! jq -e '
   type == "object"
-  and keys == ["dispatch_enabled", "migration_run", "operator_installed", "runtime_created"]
+  and keys == ["automatic_inventory_enabled", "canary_mode", "dispatch_enabled", "migration_run", "operator_installed", "runtime_created"]
   and all(.[]; type == "boolean")
   and ((.migration_run == false) or .runtime_created)
   and ((.operator_installed == false) or .migration_run)
   and ((.dispatch_enabled == false) or .operator_installed)
+  and ((.automatic_inventory_enabled == false) or .dispatch_enabled)
+  and ((.canary_mode == false) or (.operator_installed and (.automatic_inventory_enabled == false)))
 ' <<<"${DEPLOYMENT_STATE_JSON}" >/dev/null; then
   die "deployment_state is malformed or violates staged deployment ordering"
 fi
 DEPLOYMENT_STAGE="$(jq -r '
-  if .dispatch_enabled then "active"
+  if .automatic_inventory_enabled then "active"
+  elif (.canary_mode and .dispatch_enabled) then "canary"
+  elif .canary_mode then "canary-paused"
+  elif .dispatch_enabled then "dispatch-only"
   elif .operator_installed then "operator-installed"
   elif .migration_run then "migrated"
   elif .runtime_created then "runtime-paused"
@@ -261,6 +288,7 @@ fi
 MIGRATION_CHECKSUM="$(python3 - "${SOURCE_TREE}/db/migrations" <<'PY'
 import hashlib
 import pathlib
+import re
 import sys
 
 root = pathlib.Path(sys.argv[1])
@@ -271,9 +299,34 @@ entries = sorted(root.iterdir(), key=lambda path: path.name.encode("utf-8"))
 symlinks = [path.name for path in entries if path.is_symlink()]
 if symlinks:
     raise SystemExit(f"migration directory contains a symlink: {symlinks[0]}")
-paths = [path for path in entries if path.is_file()]
+pattern = re.compile(r"^([0-9]{6})_([a-z0-9][a-z0-9_]*)\.(up|down)\.sql$")
+matches = [pattern.fullmatch(path.name) for path in entries]
+invalid = [
+    path.name
+    for path, match in zip(entries, matches, strict=True)
+    if not path.is_file() or match is None
+]
+if invalid:
+    raise SystemExit(f"invalid migration artifact: {invalid[0]}")
+paths = entries
 if not paths:
     raise SystemExit("migration directory contains no regular files")
+
+pairs = {}
+for match in matches:
+    if match is None:
+        raise SystemExit("invalid migration match")
+    version, name, direction = match.groups()
+    slot = pairs.setdefault(version, {"name": name, "directions": set()})
+    if slot["name"] != name or direction in slot["directions"]:
+        raise SystemExit(f"invalid migration pair for version {version}")
+    slot["directions"].add(direction)
+versions = sorted(pairs)
+if versions != [f"{index:06d}" for index in range(1, len(versions) + 1)]:
+    raise SystemExit("migration versions must be contiguous starting at 000001")
+for version, pair in pairs.items():
+    if pair["directions"] != {"up", "down"}:
+        raise SystemExit(f"migration {version} must contain one up and one down file")
 
 digest = hashlib.sha256()
 for path in paths:
@@ -434,6 +487,38 @@ resolve_ecr_digest() {
   return 1
 }
 
+verify_remote_image_architecture() {
+  local image_reference="$1"
+  local image_metadata
+  local expected_oci_architecture
+
+  case "${ARCHITECTURE}" in
+    arm64) expected_oci_architecture="arm64" ;;
+    x86_64) expected_oci_architecture="amd64" ;;
+    *) return 1 ;;
+  esac
+  if ! image_metadata="$(
+    docker buildx imagetools inspect \
+      "${image_reference}" \
+      --format '{{json .Image}}'
+  )"; then
+    return 1
+  fi
+  jq -e \
+    --arg platform "${PLATFORM}" \
+    --arg architecture "${expected_oci_architecture}" '
+      type == "object"
+      and (
+        (.os == "linux" and .architecture == $architecture)
+        or (
+          keys == [$platform]
+          and .[$platform].os == "linux"
+          and .[$platform].architecture == $architecture
+        )
+      )
+    ' <<<"${image_metadata}" >/dev/null
+}
+
 DIGESTS=()
 for index in "${!COMPONENTS[@]}"; do
   COMPONENT="${COMPONENTS[$index]}"
@@ -492,6 +577,10 @@ for index in "${!COMPONENTS[@]}"; do
     fi
   fi
 
+  if ! verify_remote_image_architecture "${REPOSITORY_URLS[$index]}@${ECR_DIGEST}"; then
+    die "remote ${COMPONENT} digest does not contain exactly the expected ${PLATFORM} runtime image"
+  fi
+
   log "scanning immutable ${COMPONENT} digest ${ECR_DIGEST}"
   "${TRIVY_BIN}" image \
     --scanners vuln \
@@ -514,3 +603,6 @@ for index in "${!COMPONENTS[@]}"; do
 done
 printf '}\n\n'
 printf 'migration_checksum = "%s"\n' "${MIGRATION_CHECKSUM}"
+printf 'lambda_architecture = "%s"\n' "${ARCHITECTURE}"
+printf 'node_ami_type = "%s"\n' "${APPLIED_NODE_AMI_TYPE}"
+printf 'node_instance_types = %s\n' "${APPLIED_NODE_INSTANCE_TYPES}"

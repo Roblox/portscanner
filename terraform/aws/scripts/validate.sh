@@ -53,15 +53,21 @@ for root in "${ROOTS[@]}"; do
   fi
 done
 
-TEST_MODULES=(
-  "${AWS_DIR}/modules/functions"
-  "${AWS_DIR}/modules/signals"
-  "${AWS_DIR}/modules/storage"
-  "${AWS_DIR}/modules/eks"
-  "${AWS_DIR}/member-account"
-  "${AWS_DIR}/modules/network"
-  "${AWS_DIR}/modules/repositories"
+REPOSITORY_ROOT="$(git -C "${AWS_DIR}" rev-parse --show-toplevel)"
+TEST_MODULES=()
+while IFS= read -r module; do
+  TEST_MODULES+=("${REPOSITORY_ROOT}/${module}")
+done < <(
+  git -C "${REPOSITORY_ROOT}" ls-files ':(glob)terraform/aws/**/*.tftest.hcl' |
+    while IFS= read -r test_file; do
+      dirname "${test_file}"
+    done |
+    LC_ALL=C sort -u
 )
+if [[ "${#TEST_MODULES[@]}" -eq 0 ]]; then
+  echo "no tracked Terraform contract tests were found" >&2
+  exit 1
+fi
 
 for module in "${TEST_MODULES[@]}"; do
   module_name="$(basename "${module}")"

@@ -186,6 +186,8 @@ class DynamoStateStore:
     ) -> None:
         if not table_name:
             raise ValueError("table_name is required")
+        if not 86_400 <= outbox_ttl_seconds <= 31_536_000:
+            raise ValueError("outbox_ttl_seconds must be between one day and one year")
         self._client = client
         self._table_name = table_name
         self._outbox_ttl_seconds = outbox_ttl_seconds
@@ -248,7 +250,8 @@ class DynamoStateStore:
             "event_json": _s(event_json(event)),
             "account_id": _s(target.account_id),
             "region": _s(target.region),
-            "expires_at": _n(int(now.timestamp()) + self._outbox_ttl_seconds),
+            "delivery_ttl_seconds": _n(self._outbox_ttl_seconds),
+            "created_at": _s(_timestamp(now)),
         }
 
     def _decode_state(self, item: Mapping[str, Any]) -> TargetState:

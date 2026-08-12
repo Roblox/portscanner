@@ -30,6 +30,7 @@ func TestSharedTargetEventReachesEveryScannerInput(t *testing.T) {
 		string(os.PathListSeparator),
 	)
 	pythonExecutable := os.Getenv("PORTSCANNER_TEST_PYTHON")
+	pythonExplicitlyConfigured := pythonExecutable != ""
 	if pythonExecutable == "" {
 		pythonExecutable = "python3"
 	}
@@ -39,6 +40,13 @@ func TestSharedTargetEventReachesEveryScannerInput(t *testing.T) {
 		"import sys, pydantic; assert sys.version_info >= (3, 12)",
 	)
 	if output, err := probe.CombinedOutput(); err != nil {
+		if pythonExplicitlyConfigured {
+			t.Fatalf(
+				"configured shared-contract Python interpreter is unusable: %v: %s",
+				err,
+				output,
+			)
+		}
 		t.Skipf("shared-contract Python dependencies are unavailable: %v: %s", err, output)
 	}
 
@@ -133,6 +141,7 @@ print(json.dumps(build_scanner_resource(event, namespace="integration")))
 	}
 	now := time.Date(2030, time.January, 2, 3, 5, 5, 0, time.UTC)
 	config := validJobConfig()
+	config.ScannerNamespace = scanner.Namespace
 	job, err := buildJob(&scanner, config, now)
 	if err != nil {
 		t.Fatalf("build scanner Job: %v", err)
@@ -183,6 +192,8 @@ print(json.dumps(build_scanner_resource(event, namespace="integration")))
 		"--target=" + scanner.Spec.Target.Address,
 		"--profile=" + string(scanner.Spec.Profile),
 		"--tcp-ports=1-65535",
+		"--min-rate=100",
+		"--max-rate=500",
 	} {
 		if !strings.Contains(arguments, required) {
 			t.Errorf("scanner arguments do not contain %q: %#v", required, container.Args)

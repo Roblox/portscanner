@@ -6,6 +6,7 @@ import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
+from ipaddress import AddressValueError, IPv4Address, IPv4Network
 
 SCANNER_API_GROUP = "scanning.portscanner.io"
 SCANNER_API_VERSION = "v1alpha1"
@@ -62,6 +63,22 @@ def _positive_int(
     return value
 
 
+def _cidrs(environment: Mapping[str, str], name: str) -> tuple[IPv4Network, ...]:
+    networks: set[IPv4Network] = set()
+    for raw in environment.get(name, "").split(","):
+        value = raw.strip()
+        if not value:
+            continue
+        try:
+            network = IPv4Network(value, strict=True)
+        except ValueError as error:
+            raise ConfigurationError(f"{name} must contain canonical IPv4 networks") from error
+        if str(network) != value:
+            raise ConfigurationError(f"{name} must contain canonical IPv4 networks")
+        networks.add(network)
+    return tuple(sorted(networks, key=lambda item: (int(item.network_address), item.prefixlen)))
+
+
 @dataclass(frozen=True)
 class GeneratorConfig:
     """Complete, validated deployment configuration."""
@@ -80,6 +97,8 @@ class GeneratorConfig:
     claim_lease_seconds: int = 120
     audit_ttl_days: int = 30
     max_event_bytes: int = 65_536
+    allowed_target_cidrs: tuple[IPv4Network, ...] = ()
+    denied_target_cidrs: tuple[IPv4Network, ...] = ()
 
     def __post_init__(self) -> None:
         bucket = self.event_bucket.strip()
@@ -132,6 +151,26 @@ class GeneratorConfig:
             raise ConfigurationError("AUDIT_TTL_DAYS must be greater than zero")
         if not 1 <= self.max_event_bytes <= 65_536:
             raise ConfigurationError("MAX_EVENT_BYTES must be between 1 and 65536")
+        for name, networks in (
+            ("ALLOWED_TARGET_CIDRS", self.allowed_target_cidrs),
+            ("DENIED_TARGET_CIDRS", self.denied_target_cidrs),
+        ):
+            if any(
+                network.version != 4 or network != IPv4Network(str(network), strict=True)
+                for network in networks
+            ):
+                raise ConfigurationError(f"{name} must contain canonical IPv4 networks")
+
+    def target_allowed(self, address: str) -> bool:
+        try:
+            parsed = IPv4Address(address)
+        except AddressValueError:
+            return False
+        if any(parsed in network for network in self.denied_target_cidrs):
+            return False
+        return not self.allowed_target_cidrs or any(
+            parsed in network for network in self.allowed_target_cidrs
+        )
 
     @classmethod
     def from_environment(
@@ -183,4 +222,6 @@ class GeneratorConfig:
             ),
             audit_ttl_days=_positive_int(env, "AUDIT_TTL_DAYS", 30),
             max_event_bytes=_positive_int(env, "MAX_EVENT_BYTES", 65_536),
+            allowed_target_cidrs=_cidrs(env, "ALLOWED_TARGET_CIDRS"),
+            denied_target_cidrs=_cidrs(env, "DENIED_TARGET_CIDRS"),
         )

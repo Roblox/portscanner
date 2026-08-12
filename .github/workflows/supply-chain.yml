@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: 2026 Portscanner contributors
 # SPDX-License-Identifier: MIT
 
-name: Supply chain and publication
+name: Supply chain
 
 on:
   pull_request:

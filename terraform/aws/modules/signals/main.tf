@@ -53,13 +53,24 @@ variable "existing_config_aggregator_name" {
 }
 
 variable "existing_cloudtrail_arn" {
-  description = "Existing multi-region management CloudTrail ARN. A trail is created when null."
+  description = "Existing multi-region management CloudTrail ARN when cloudtrail_mode is existing."
   type        = string
   default     = null
 
   validation {
     condition     = var.existing_cloudtrail_arn == null || can(regex("^arn:[^:]+:cloudtrail:[^:]+:[0-9]{12}:trail/.+$", var.existing_cloudtrail_arn))
     error_message = "existing_cloudtrail_arn must be a CloudTrail trail ARN."
+  }
+}
+
+variable "cloudtrail_mode" {
+  description = "create provisions a management trail, existing references an approved trail, and disabled omits local API-call hints."
+  type        = string
+  default     = "create"
+
+  validation {
+    condition     = contains(["create", "existing", "disabled"], var.cloudtrail_mode)
+    error_message = "cloudtrail_mode must be create, existing, or disabled."
   }
 }
 
@@ -160,8 +171,11 @@ locals {
     kind => merge(pattern, {
       account = [data.aws_caller_identity.current.account_id]
       }) if(
-      length(var.authorized_account_ids) == 0 ||
-      contains(var.authorized_account_ids, data.aws_caller_identity.current.account_id)
+      (
+        length(var.authorized_account_ids) == 0 ||
+        contains(var.authorized_account_ids, data.aws_caller_identity.current.account_id)
+      ) &&
+      (kind != "cloudtrail" || var.cloudtrail_mode != "disabled")
     )
   }
   local_rule_names = {
@@ -205,6 +219,17 @@ resource "terraform_data" "signal_validation" {
     precondition {
       condition     = !var.enable_event_dispatch || length(var.signal_queue_arn) > 0
       error_message = "A signal queue is required before event dispatch can be enabled."
+    }
+
+    precondition {
+      condition = (
+        var.cloudtrail_mode == "existing" &&
+        var.existing_cloudtrail_arn != null
+        ) || (
+        var.cloudtrail_mode != "existing" &&
+        var.existing_cloudtrail_arn == null
+      )
+      error_message = "existing_cloudtrail_arn is required only when cloudtrail_mode is existing."
     }
 
     precondition {
@@ -299,7 +324,7 @@ resource "aws_config_configuration_aggregator" "this" {
 }
 
 resource "aws_cloudtrail" "management" {
-  count = var.existing_cloudtrail_arn == null ? 1 : 0
+  count = var.cloudtrail_mode == "create" ? 1 : 0
 
   name                          = var.cloudtrail_name
   s3_bucket_name                = var.cloudtrail_bucket_name
@@ -455,7 +480,11 @@ output "config_aggregator_name" {
 }
 
 output "cloudtrail_arn" {
-  value = var.existing_cloudtrail_arn != null ? var.existing_cloudtrail_arn : aws_cloudtrail.management[0].arn
+  value = (
+    var.cloudtrail_mode == "create" ? aws_cloudtrail.management[0].arn :
+    var.cloudtrail_mode == "existing" ? var.existing_cloudtrail_arn :
+    null
+  )
 }
 
 output "central_event_bus_arn" {
@@ -470,6 +499,24 @@ output "signal_rule_arns" {
   value = concat(
     values(aws_cloudwatch_event_rule.local)[*].arn,
     values(aws_cloudwatch_event_rule.central)[*].arn
+  )
+}
+
+output "signal_rule_controls" {
+  description = "Exact EventBridge signal-rule names and buses managed by this module."
+  value = concat(
+    [
+      for rule in values(aws_cloudwatch_event_rule.local) : {
+        name           = rule.name
+        event_bus_name = "default"
+      }
+    ],
+    [
+      for rule in values(aws_cloudwatch_event_rule.central) : {
+        name           = rule.name
+        event_bus_name = rule.event_bus_name
+      }
+    ]
   )
 }
 

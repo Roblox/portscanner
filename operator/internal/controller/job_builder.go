@@ -18,6 +18,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 const (
@@ -25,6 +26,7 @@ const (
 	jobNameHashLength   = 10
 	maxContractText     = 256
 	maxCoverageTerms    = 256
+	targetHashLabel     = "scanning.portscanner.io/target-hash"
 )
 
 var (
@@ -59,9 +61,12 @@ var (
 type JobConfig struct {
 	ScannerImage            string
 	ScannerImagePullPolicy  corev1.PullPolicy
+	ScannerNamespace        string
 	ServiceAccountName      string
 	AllowedCIDRs            []netip.Prefix
 	DeniedCIDRs             []netip.Prefix
+	MinRate                 int
+	MaxRate                 int
 	ResultBucket            string
 	ResultPrefix            string
 	HighPriorityClassName   string
@@ -81,11 +86,20 @@ func (c JobConfig) Validate() error {
 	if c.ServiceAccountName == "" {
 		return fmt.Errorf("scanner service account must be configured")
 	}
+	if errors := validation.IsDNS1123Label(c.ScannerNamespace); len(errors) > 0 {
+		return fmt.Errorf("scanner namespace must be a DNS-1123 label: %s", strings.Join(errors, "; "))
+	}
 	if err := validateCanonicalIPv4Prefixes("allowed CIDR", c.AllowedCIDRs); err != nil {
 		return err
 	}
 	if err := validateCanonicalIPv4Prefixes("denied CIDR", c.DeniedCIDRs); err != nil {
 		return err
+	}
+	if c.MinRate < 1 || c.MinRate > 2000 {
+		return fmt.Errorf("scanner minimum rate must be between 1 and 2000")
+	}
+	if c.MaxRate < c.MinRate || c.MaxRate > 5000 {
+		return fmt.Errorf("scanner maximum rate must be between the minimum rate and 5000")
 	}
 	if err := validateResultDestination(c.ResultBucket, c.ResultPrefix); err != nil {
 		return err
@@ -416,10 +430,22 @@ func buildJob(scanner *scanningv1alpha1.Scanner, config JobConfig, now time.Time
 	if err := validateScannerSpec(scanner.Spec); err != nil {
 		return nil, err
 	}
+	if scanner.Namespace != config.ScannerNamespace {
+		return nil, fmt.Errorf(
+			"Scanner namespace %q is outside configured namespace %q",
+			scanner.Namespace,
+			config.ScannerNamespace,
+		)
+	}
 	args, err := scannerArguments(scanner.Spec)
 	if err != nil {
 		return nil, err
 	}
+	args = append(
+		args,
+		fmt.Sprintf("--min-rate=%d", config.MinRate),
+		fmt.Sprintf("--max-rate=%d", config.MaxRate),
+	)
 	deadlineSeconds, err := activeDeadlineSeconds(scanner.Spec, now)
 	if err != nil {
 		return nil, err
@@ -491,6 +517,7 @@ func buildJob(scanner *scanningv1alpha1.Scanner, config JobConfig, now time.Time
 		"app.kubernetes.io/component":  "scanner",
 		"scanning.portscanner.io/name": scannerLabelValue(scanner.Name),
 		"batch.kubernetes.io/job-name": jobName,
+		targetHashLabel:                targetAddressHash(scanner.Spec.Target.Address),
 	}
 
 	return &batchv1.Job{
@@ -517,12 +544,24 @@ func buildJob(scanner *scanningv1alpha1.Scanner, config JobConfig, now time.Time
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: copyStringMap(labels)},
 				Spec: corev1.PodSpec{
-					ServiceAccountName:            config.ServiceAccountName,
-					AutomountServiceAccountToken:  boolPointer(false),
-					RestartPolicy:                 corev1.RestartPolicyNever,
-					PriorityClassName:             priorityClassName(scanner.Spec.Priority, config),
-					NodeSelector:                  copyStringMap(config.NodeSelector),
-					Tolerations:                   append([]corev1.Toleration(nil), config.Tolerations...),
+					ServiceAccountName:           config.ServiceAccountName,
+					AutomountServiceAccountToken: boolPointer(false),
+					RestartPolicy:                corev1.RestartPolicyNever,
+					PriorityClassName:            priorityClassName(scanner.Spec.Priority, config),
+					NodeSelector:                 copyStringMap(config.NodeSelector),
+					Tolerations:                  append([]corev1.Toleration(nil), config.Tolerations...),
+					Affinity: &corev1.Affinity{
+						PodAntiAffinity: &corev1.PodAntiAffinity{
+							RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
+								LabelSelector: &metav1.LabelSelector{MatchLabels: map[string]string{
+									"app.kubernetes.io/component": "scanner",
+								}},
+								MatchLabelKeys:    []string{targetHashLabel},
+								NamespaceSelector: &metav1.LabelSelector{},
+								TopologyKey:       corev1.LabelTopologyRegion,
+							}},
+						},
+					},
 					EnableServiceLinks:            &enableServiceLinks,
 					TerminationGracePeriodSeconds: &terminationGracePeriodSeconds,
 					SecurityContext: &corev1.PodSecurityContext{
@@ -595,4 +634,9 @@ func scannerLabelValue(name string) string {
 		base = "scanner"
 	}
 	return base + "-" + suffix
+}
+
+func targetAddressHash(address string) string {
+	sum := sha256.Sum256([]byte(address))
+	return fmt.Sprintf("%x", sum[:])[:32]
 }

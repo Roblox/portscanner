@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -17,6 +18,32 @@ class _ConnectionContext:
 
     def __exit__(self, *_args: object) -> None:
         return None
+
+
+def test_default_migrations_path_prefers_packaged_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "venv" / "site-packages" / "act_migrator"
+    migrations = package / "migrations"
+    migrations.mkdir(parents=True)
+    monkeypatch.delenv("MIGRATIONS_PATH", raising=False)
+    monkeypatch.setattr(handler, "__file__", str(package / "handler.py"))
+
+    assert handler.default_migrations_path() == migrations
+
+
+def test_default_migrations_path_fails_when_payload_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    package = tmp_path / "venv" / "site-packages" / "act_migrator"
+    package.mkdir(parents=True)
+    monkeypatch.delenv("MIGRATIONS_PATH", raising=False)
+    monkeypatch.setattr(handler, "__file__", str(package / "handler.py"))
+
+    with pytest.raises(handler.MigrationError, match="migration SQL is missing"):
+        handler.default_migrations_path()
 
 
 def _configure(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, Any]]:

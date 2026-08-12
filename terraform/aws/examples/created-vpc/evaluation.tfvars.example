@@ -1,0 +1,47 @@
+# Copy this file outside the repository or to evaluation.tfvars (ignored by Git),
+# replace every REPLACE_* value, and keep it private.
+
+aws_region  = "us-east-1"
+name_prefix = "portscanner-eval"
+vpc_cidr    = "10.64.0.0/20"
+
+# The provider refuses to use credentials for any other account.
+expected_deployment_account_id = "REPLACE_WITH_12_DIGIT_ACCOUNT_ID"
+
+# Direct EC2 snapshots avoid creating or changing the account's singleton AWS Config
+# recorder. CloudTrail is also disabled for the one-shot evaluation; native EC2 state
+# hints remain defined but paused, and local API-call hints are omitted.
+config_mode      = "disabled"
+snapshot_regions = []
+cloudtrail_mode  = "disabled"
+
+# Both boundaries apply at dispatch. Keep the CIDR scope to one explicitly authorized
+# public canary address until the complete evaluation has been reviewed.
+authorized_account_ids = ["REPLACE_WITH_12_DIGIT_ACCOUNT_ID"]
+allowed_target_cidrs    = ["REPLACE_WITH_AUTHORIZED_PUBLIC_IPV4/32"]
+denied_target_cidrs     = []
+
+# One target, one reconciler, and conservative Nmap rates for the first proof.
+operator_max_concurrent_reconciles = 1
+scanner_max_concurrent_pods        = 1
+scanner_max_jobs                   = 4
+scanner_min_rate                   = 100
+scanner_max_rate                   = 250
+
+# This is appropriate only for a short-lived evaluation whose evidence may be deleted.
+force_destroy_buckets     = true
+force_delete_repositories = true
+
+# The evaluation opts into an IAM-authenticated public EKS endpoint restricted to the
+# Terraform runner's current public address. Never use 0.0.0.0/0. Production should
+# disable this path and use private runner/VPN security groups instead.
+eks_endpoint_public_access = true
+eks_public_access_cidrs    = ["REPLACE_WITH_RUNNER_PUBLIC_IPV4/32"]
+
+# Use the stable IAM role/user ARN used by Terraform. An assumed-role STS ARN is not
+# accepted; use its underlying IAM role ARN.
+eks_installer_principal_arns = ["REPLACE_WITH_STABLE_IAM_ROLE_OR_USER_ARN"]
+
+# Leave this empty for the restricted public evaluation path. Production should disable
+# public access and set one or more approved private runner/VPN security groups here.
+eks_api_client_security_group_ids = []

@@ -5,13 +5,39 @@ SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
 AWS_DIR="$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd)"
 
 usage() {
-  echo "usage: $0 <terraform-root> <foundation|runtime|migrate|activate> [variables.tfvars]" >&2
+  echo "usage: $0 <terraform-root> <foundation|runtime|migrate|canary|activate|pause|pause-canary> [variables.tfvars ...]" >&2
   exit 2
 }
 
-[[ $# -ge 2 && $# -le 3 ]] || usage
+[[ $# -ge 2 ]] || usage
 command -v terraform >/dev/null 2>&1 || {
   echo "terraform is required" >&2
+  exit 1
+}
+command -v aws >/dev/null 2>&1 || {
+  echo "AWS CLI is required for deployment identity checks" >&2
+  exit 1
+}
+
+EXPECTED_ACCOUNT_ID="${PORTSCANNER_EXPECTED_AWS_ACCOUNT_ID:-}"
+EXPECTED_REGION="${PORTSCANNER_EXPECTED_AWS_REGION:-}"
+[[ "${EXPECTED_ACCOUNT_ID}" =~ ^[0-9]{12}$ ]] || {
+  echo "PORTSCANNER_EXPECTED_AWS_ACCOUNT_ID must be a 12-digit AWS account ID" >&2
+  exit 1
+}
+[[ "${EXPECTED_REGION}" =~ ^[a-z]{2}(-[a-z0-9]+)+-[0-9]+$ ]] || {
+  echo "PORTSCANNER_EXPECTED_AWS_REGION must be an AWS Region name" >&2
+  exit 1
+}
+
+ACTUAL_ACCOUNT_ID="$(
+  aws sts get-caller-identity \
+    --region "${EXPECTED_REGION}" \
+    --query Account \
+    --output text
+)"
+[[ "${ACTUAL_ACCOUNT_ID}" == "${EXPECTED_ACCOUNT_ID}" ]] || {
+  echo "AWS identity mismatch: expected account ${EXPECTED_ACCOUNT_ID}, got ${ACTUAL_ACCOUNT_ID}" >&2
   exit 1
 }
 
@@ -49,8 +75,7 @@ for cli_args_name in TF_CLI_ARGS TF_CLI_ARGS_plan TF_CLI_ARGS_apply; do
 done
 
 PLAN_ARGS=()
-if [[ $# -eq 3 ]]; then
-  VAR_FILE="$3"
+for VAR_FILE in "${@:3}"; do
   if [[ "${VAR_FILE}" != /* ]]; then
     VAR_FILE="${ROOT}/${VAR_FILE}"
   fi
@@ -59,7 +84,11 @@ if [[ $# -eq 3 ]]; then
     exit 1
   }
   PLAN_ARGS+=("-var-file=${VAR_FILE}")
-fi
+done
+PLAN_ARGS+=(
+  "-var=aws_region=${EXPECTED_REGION}"
+  "-var=expected_deployment_account_id=${EXPECTED_ACCOUNT_ID}"
+)
 
 INIT_ARGS=("-input=false")
 if [[ -n "${TF_BACKEND_CONFIG:-}" ]]; then
@@ -81,6 +110,8 @@ case "${STAGE}" in
       "-var=run_migration=false"
       "-var=install_operator=false"
       "-var=enable_event_dispatch=false"
+      "-var=enable_automatic_inventory=false"
+      "-var=canary_mode=false"
     )
     ;;
   runtime)
@@ -89,14 +120,38 @@ case "${STAGE}" in
       "-var=run_migration=false"
       "-var=install_operator=false"
       "-var=enable_event_dispatch=false"
+      "-var=enable_automatic_inventory=false"
+      "-var=canary_mode=false"
     )
     ;;
-  migrate)
+  migrate | pause)
     STAGE_ARGS=(
       "-var=deploy_runtime=true"
       "-var=run_migration=true"
       "-var=install_operator=true"
       "-var=enable_event_dispatch=false"
+      "-var=enable_automatic_inventory=false"
+      "-var=canary_mode=false"
+    )
+    ;;
+  pause-canary)
+    STAGE_ARGS=(
+      "-var=deploy_runtime=true"
+      "-var=run_migration=true"
+      "-var=install_operator=true"
+      "-var=enable_event_dispatch=false"
+      "-var=enable_automatic_inventory=false"
+      "-var=canary_mode=true"
+    )
+    ;;
+  canary)
+    STAGE_ARGS=(
+      "-var=deploy_runtime=true"
+      "-var=run_migration=true"
+      "-var=install_operator=true"
+      "-var=enable_event_dispatch=true"
+      "-var=enable_automatic_inventory=false"
+      "-var=canary_mode=true"
     )
     ;;
   activate)
@@ -105,19 +160,12 @@ case "${STAGE}" in
       "-var=run_migration=true"
       "-var=install_operator=true"
       "-var=enable_event_dispatch=true"
+      "-var=enable_automatic_inventory=true"
+      "-var=canary_mode=false"
     )
     ;;
   *)
     usage
-    ;;
-esac
-
-case "${STAGE}" in
-  migrate | activate)
-    command -v aws >/dev/null 2>&1 || {
-      echo "AWS CLI is required for Helm exec authentication during ${STAGE}" >&2
-      exit 1
-    }
     ;;
 esac
 
@@ -155,7 +203,42 @@ case "${STAGE}" in
       exit 1
     }
     ;;
-  activate)
+  canary | activate)
+    state_contains "aws_lambda_invocation.migration" || {
+      echo "migration state was not found; apply the migrate stage first" >&2
+      exit 1
+    }
+    state_contains "helm_release.operator" || {
+      echo "operator release state was not found; apply the migrate stage first" >&2
+      exit 1
+    }
+    if [[ "${STAGE}" == "activate" ]]; then
+      command -v jq >/dev/null 2>&1 || {
+        echo "jq is required to verify the canary stage before activation" >&2
+        exit 1
+      }
+      if ! CURRENT_DEPLOYMENT_STATE="$(
+        terraform "-chdir=${ROOT}" output -json deployment_state
+      )"; then
+        echo "deployment_state output is unavailable; apply and verify the canary stage first" >&2
+        exit 1
+      fi
+      if ! jq -e '
+        type == "object" and
+        keys == ["automatic_inventory_enabled", "canary_mode", "dispatch_enabled", "migration_run", "operator_installed", "runtime_created"] and
+        all(.[]; type == "boolean") and
+        .runtime_created and
+        .migration_run and
+        .operator_installed and
+        .canary_mode and
+        (.automatic_inventory_enabled == false)
+      ' <<<"${CURRENT_DEPLOYMENT_STATE}" >/dev/null; then
+        echo "activation requires a previously applied canary or pause-canary state" >&2
+        exit 1
+      fi
+    fi
+    ;;
+  pause | pause-canary)
     state_contains "aws_lambda_invocation.migration" || {
       echo "migration state was not found; apply the migrate stage first" >&2
       exit 1
@@ -172,6 +255,41 @@ terraform "-chdir=${ROOT}" plan \
   -out="${PLAN_FILE}" \
   "${PLAN_ARGS[@]}" \
   "${STAGE_ARGS[@]}"
+
+case "${STAGE}" in
+  pause | pause-canary)
+    command -v jq >/dev/null 2>&1 || {
+      echo "jq is required to validate a pause plan" >&2
+      exit 1
+    }
+    PLAN_JSON="${WORK_DIR}/${STAGE}.json"
+    terraform "-chdir=${ROOT}" show -json "${PLAN_FILE}" >"${PLAN_JSON}"
+    if ! jq -e '
+      def disables_mapping_only:
+        .type == "aws_lambda_event_source_mapping" and
+        .change.before.enabled == true and
+        .change.after.enabled == false and
+        ((.change.before | del(.enabled)) == (.change.after | del(.enabled)));
+      def disables_rule_only:
+        .type == "aws_cloudwatch_event_rule" and
+        .change.before.state == "ENABLED" and
+        .change.after.state == "DISABLED" and
+        ((.change.before | del(.state)) == (.change.after | del(.state)));
+      [
+        .resource_changes[]?
+        | select(.mode == "managed")
+        | select(.change.actions != ["no-op"])
+      ]
+      | all(.[];
+          (.change.actions == ["update"]) and
+          (disables_mapping_only or disables_rule_only)
+        )
+    ' "${PLAN_JSON}" >/dev/null; then
+      echo "refusing pause plan: it changes resources outside dispatch mappings and rules" >&2
+      exit 1
+    fi
+    ;;
+esac
 
 if [[ "${PORTSCANNER_AUTO_APPROVE:-false}" != "true" ]]; then
   printf 'Type %s to apply this saved plan: ' "${STAGE}"
@@ -196,9 +314,16 @@ case "${STAGE}" in
     ;;
   migrate)
     echo "Keyed migration completed and the namespace-scoped operator was installed; dispatch remains paused."
-    echo "Verify private EKS and application health before running the activate stage."
+    echo "Verify EKS and application health before running the canary stage."
+    ;;
+  canary)
+    echo "One-target priority/result and stream processing are active; signal/coverage consumers, schedules, and EventBridge inventory hints remain paused."
+    echo "Invoke the snapshot Lambda once with an exact account_id, region, and target_public_ipv4, then return to the pause-canary stage."
     ;;
   activate)
-    echo "Event mappings, schedules, and filtered EC2 hint forwarding are active."
+    echo "Queue and stream processing, schedules, and filtered EC2 hint forwarding are active."
+    ;;
+  pause | pause-canary)
+    echo "Event mappings, schedules, and filtered EC2 hint forwarding are paused; runtime and evidence are retained."
     ;;
 esac

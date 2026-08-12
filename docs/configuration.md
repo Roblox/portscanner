@@ -25,7 +25,7 @@ Dispatch is permitted only when all gates agree:
 - when a deployment CIDR allowlist is configured, the address is inside it;
 - the address is not in a denylist or reserved range;
 - the requested profile is approved for that source;
-- the global, source, and destination rate budgets have capacity;
+- the hard scanner-Pod quota has capacity and no active Pod owns the same destination;
 - the work deadline has not expired; and
 - the deployment-wide dispatch feature gate is enabled.
 
@@ -67,8 +67,9 @@ differ.
 
 - allowed transports and ports;
 - host, CIDR, and profile size limits;
-- packet and concurrent-job rates;
-- source and destination rate buckets;
+- per-Job Nmap minimum/maximum rates and a deployment-wide active-Pod quota;
+- required destination serialization; add independent source token buckets before a
+  mutually untrusted multi-tenant rollout;
 - connect, host, and job timeouts;
 - approved scanner arguments; and
 - evidence completeness requirements.
@@ -91,14 +92,18 @@ Terraform exposes the deployment boundary in `terraform/aws/application`:
 
 - `config_mode` (`create`, `existing`, or `disabled`) and
   `existing_config_aggregator_name`;
-- `existing_cloudtrail_arn`;
+- `cloudtrail_mode` (`create`, `existing`, or `disabled`) and
+  `existing_cloudtrail_arn`;
 - `create_vpc` plus existing VPC/subnet inputs and the required existing-private-subnet
   egress declaration;
 - `authorized_account_ids`, `allowed_member_account_ids`,
   `member_collector_role_arns`, `allowed_target_cidrs`, and
   `denied_target_cidrs`;
+- `operator_max_concurrent_reconciles`, `scanner_max_concurrent_pods`,
+  `scanner_max_jobs`, `scanner_min_rate`, and `scanner_max_rate`;
 - `eks_api_client_security_group_ids` and `eks_installer_principal_arns` for the
-  private Helm runner's network and identity paths;
+  private Helm runner's network and identity paths, or the evaluation-only
+  `eks_endpoint_public_access` plus restricted `eks_public_access_cidrs`;
 - `snapshot_schedule_expression` (five minutes by default) and
   `rescan_schedule_expression` (six hours by default);
 - `queue_visibility_timeout_seconds`, 360 seconds by default and required to be at
@@ -108,16 +113,24 @@ Terraform exposes the deployment boundary in `terraform/aws/application`:
 - optional `alarm_action_arns` and `ok_action_arns`, both empty by default;
 - `force_destroy_buckets`, disabled by default and intended only for disposable
   sandbox cleanup;
+- `force_delete_repositories`, disabled by default and intended only for disposable
+  ECR cleanup during destroy;
 - `ecr_untagged_image_expiration_days`, null by default; no Terraform lifecycle rule
   expires tagged release images;
 - `image_digests` and `migration_checksum`; and
-- staged flags `deploy_runtime`, `run_migration`, `install_operator`, and
-  `enable_event_dispatch`.
+- staged flags `deploy_runtime`, `run_migration`, `install_operator`,
+  `enable_event_dispatch`, `enable_automatic_inventory`, and `canary_mode`.
 
-All scope collections default empty and all activation flags default false. Event
+All scope collections default empty and all activation flags default false. Queue and
+stream dispatch can be tested independently while recurring schedules and EventBridge
+inventory hints remain off. Event
 dispatch still requires nonempty `authorized_account_ids`; the target CIDR sets are
 optional defense-in-depth. They are useful when authorization follows fixed Elastic IP
 ranges, but are often impractical for dynamic public addresses.
+
+The EKS public API endpoint defaults off. Enabling it requires at least one canonical
+IPv4 prefix, rejects `0.0.0.0/0`, and retains private endpoint access. Use that path only
+for a bounded evaluation; production should use private runner or VPN security groups.
 
 `config_mode = "create"` records only the provider Region and scopes its aggregator to
 that explicit Region. A member account in that same source Region must grant
@@ -144,7 +157,12 @@ S3/DynamoDB gateway route-table associations. AWS China service names are mapped
 individually because the required set mixes `com.amazonaws` and `cn.com.amazonaws`.
 Supply one attached security group for every interface endpoint; Terraform adds TCP/443
 ingress from its Lambda and EKS workload security groups. The operator must still verify
-that endpoint policies permit every required API action.
+that endpoint policies permit every required API action. Endpoint-only mode is valid
+only while dispatch is paused; enabling scanner dispatch requires validated NAT/TGW
+public egress. NAT mode requires an exact set of public NAT IDs matching every private
+default route. TGW mode requires an explicit reviewed public-egress acknowledgement
+that includes active/non-blackhole default routes because Terraform cannot inspect the
+TGW's downstream route and attachment topology.
 
 Storage queue and dead-letter alarms are created regardless of action configuration.
 Lambda error, throttle, and inventory-outbox iterator-age alarms are created only when
@@ -154,10 +172,11 @@ an account ID. Terraform does not create SNS, email, or paging resources. Integr
 team-owned SNS/Pager path externally, then pass its action ARN if notifications are
 wanted. The `alarm_names` and `alarm_arns` outputs contain no secrets.
 
-Terraform passes target CIDRs through the EKS module and Helm as deployment policy. The
-operator validates canonical IPv4 prefixes at startup and adds
-`SCANNER_ALLOWED_CIDRS` or `SCANNER_DENIED_CIDRS` to scanner Jobs only for nonempty
-lists. CIDRs are not fields in a `Scanner` resource or user event. Use the created-VPC,
+Terraform passes target CIDRs to the generator and through EKS/Helm as deployment
+policy. The generator applies them before Scanner creation; the operator validates the
+same canonical IPv4 prefixes at startup and adds `SCANNER_ALLOWED_CIDRS` or
+`SCANNER_DENIED_CIDRS` to scanner Jobs only for nonempty lists. CIDRs are not fields in
+a `Scanner` resource or user event. Use the created-VPC,
 existing-VPC, central multi-account, and member-account examples only as synthetic plan
 fixtures; application examples pass no alarm actions, dispatch remains disabled by
 default, and both CIDR sets may be empty.
