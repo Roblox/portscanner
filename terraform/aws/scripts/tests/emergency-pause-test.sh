@@ -12,6 +12,31 @@ fail() {
   exit 1
 }
 
+count_matching_lines() {
+  local pattern="$1"
+  local file="$2"
+  local count=0
+  local line
+  while IFS= read -r line; do
+    if [[ "${line}" =~ ${pattern} ]]; then
+      count=$((count + 1))
+    fi
+  done <"${file}"
+  printf '%s' "${count}"
+}
+
+contains_matching_line() {
+  local pattern="$1"
+  local file="$2"
+  local line
+  while IFS= read -r line; do
+    if [[ "${line}" =~ ${pattern} ]]; then
+      return 0
+    fi
+  done <"${file}"
+  return 1
+}
+
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/portscanner-emergency-pause-test.XXXXXX")"
 cleanup() {
   rm -rf -- "${WORK_DIR}"
@@ -105,22 +130,22 @@ export PORTSCANNER_EXPECTED_AWS_REGION="us-east-2"
 "${PAUSE_SCRIPT}" "${TF_ROOT}" >"${WORK_DIR}/first-output"
 "${PAUSE_SCRIPT}" "${TF_ROOT}" >"${WORK_DIR}/second-output"
 
-[[ "$(rg -c 'lambda update-event-source-mapping' "${AWS_CALLS}")" == "1" ]] ||
+[[ "$(count_matching_lines 'lambda update-event-source-mapping' "${AWS_CALLS}")" == "1" ]] ||
   fail "event-source mapping disable must be idempotent"
-[[ "$(rg -c 'events disable-rule' "${AWS_CALLS}")" == "2" ]] ||
+[[ "$(count_matching_lines 'events disable-rule' "${AWS_CALLS}")" == "2" ]] ||
   fail "EventBridge disable must be idempotent"
-rg -q 'events disable-rule .*--event-bus-name portscanner-bus' "${AWS_CALLS}" ||
+contains_matching_line 'events disable-rule .*--event-bus-name portscanner-bus' "${AWS_CALLS}" ||
   fail "custom EventBridge bus was not passed to the emergency pause"
-if rg -q ' plan( |$)' "${TF_CALLS}"; then
+if contains_matching_line ' plan( |$)' "${TF_CALLS}"; then
   fail "emergency pause must not run terraform plan"
 fi
-rg -q 'Emergency dispatch pause verified' "${WORK_DIR}/first-output" ||
+contains_matching_line 'Emergency dispatch pause verified' "${WORK_DIR}/first-output" ||
   fail "emergency pause did not report verification"
 
 if FAKE_STATE_ACCOUNT="222222222222" "${PAUSE_SCRIPT}" "${TF_ROOT}" >"${WORK_DIR}/mismatch-output" 2>&1; then
   fail "Terraform-state account mismatch should fail"
 fi
-rg -q 'Terraform state account mismatch' "${WORK_DIR}/mismatch-output" ||
+contains_matching_line 'Terraform state account mismatch' "${WORK_DIR}/mismatch-output" ||
   fail "state-account mismatch was not explained"
 
 echo "emergency pause tests passed"
