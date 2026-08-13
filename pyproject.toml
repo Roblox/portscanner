@@ -14,7 +14,7 @@ Repository = "https://github.com/Roblox/portscanner"
 [dependency-groups]
 build = [
     "hatchling==1.27.0",
-    "setuptools==80.9.0",
+    "setuptools==84.0.0",
 ]
 dev = [
     "jsonschema[format]>=4.23,<5",
