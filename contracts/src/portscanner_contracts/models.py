@@ -603,12 +603,6 @@ class Target(DeterministicModel):
     transport: TransportProtocol
     generation: Generation
 
-    @property
-    def address(self) -> str:
-        """Compatibility alias for the current public scan address."""
-
-        return self.public_address
-
     def _identity_payload(self) -> Mapping[str, Any]:
         return {
             "provider": self.provider,

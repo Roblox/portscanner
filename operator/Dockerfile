@@ -1,5 +1,5 @@
-# Copyright 2026 Roblox Corporation
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Portscanner contributors
+# SPDX-License-Identifier: MIT
 
 # syntax=docker/dockerfile:1.7
 
@@ -21,9 +21,9 @@ RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
 
 FROM scratch
 LABEL org.opencontainers.image.source="https://github.com/Roblox/portscanner" \
-      org.opencontainers.image.licenses="Apache-2.0"
+      org.opencontainers.image.licenses="MIT"
 COPY --from=builder --chmod=0555 /out/manager /manager
 COPY --from=builder /workspace/LICENSE /licenses/LICENSE
-COPY --from=builder /workspace/NOTICE /licenses/NOTICE
+COPY --from=builder /workspace/THIRD_PARTY_NOTICES.md /licenses/THIRD_PARTY_NOTICES.md
 USER 65532:65532
 ENTRYPOINT ["/manager"]

@@ -82,6 +82,7 @@ variable "cloudtrail_name" {
 variable "cloudtrail_bucket_name" {
   description = "Secure S3 bucket for a created management trail."
   type        = string
+  default     = null
 }
 
 variable "create_central_event_bus" {
@@ -172,7 +173,8 @@ locals {
       account = [data.aws_caller_identity.current.account_id]
       }) if(
       (
-        length(var.authorized_account_ids) == 0 ||
+        length(var.authorized_account_ids) == 0 ?
+        true :
         contains(var.authorized_account_ids, data.aws_caller_identity.current.account_id)
       ) &&
       (kind != "cloudtrail" || var.cloudtrail_mode != "disabled")
@@ -230,6 +232,14 @@ resource "terraform_data" "signal_validation" {
         var.existing_cloudtrail_arn == null
       )
       error_message = "existing_cloudtrail_arn is required only when cloudtrail_mode is existing."
+    }
+
+    precondition {
+      condition = var.cloudtrail_mode != "create" || try(
+        length(var.cloudtrail_bucket_name) > 0,
+        false
+      )
+      error_message = "cloudtrail_bucket_name is required when cloudtrail_mode is create."
     }
 
     precondition {

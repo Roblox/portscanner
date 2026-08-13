@@ -7,14 +7,14 @@ build-backend = "hatchling.build"
 
 [project]
 name = "portscanner-contracts"
-version = "0.1.0"
+version = "1.0.0"
 description = "Typed public data contracts for Portscanner"
 requires-python = ">=3.12"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Roblox" }]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 5 - Production/Stable",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",

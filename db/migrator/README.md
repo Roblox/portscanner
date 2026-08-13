@@ -3,27 +3,43 @@ SPDX-FileCopyrightText: 2026 Portscanner contributors
 SPDX-License-Identifier: MIT
 -->
 
-# ACT database migrator
+# Portscanner database migrator
 
-The migrator applies paired PostgreSQL migrations under a database-scoped session
-advisory lock. Application credential repair uses the same lock from secret read through
-role grants and secret publication.
+The migrator applies paired PostgreSQL migrations under a database-scoped
+session advisory lock. The canonical AWS deployment invokes it before
+installing the operator, while all scan dispatch is paused.
 
-Lambda and CLI invocations require the expected `migration_checksum` (or
-`--migration-checksum`). The migrator recomputes the ordered, length-prefixed artifact
-hash before connecting to PostgreSQL and rejects mismatches or symlinked migration
-files. The artifact set must contain only contiguous, paired migrations beginning at
-`000001`; unpaired files, version gaps, directories, and unrelated files are rejected
-before hashing.
+## Integrity and locking
 
-The `portscanner-migrator` wheel embeds the same canonical SQL files from
-`db/migrations`, so a clean `act-migrate` installation has a safe default payload.
-`MIGRATIONS_PATH` or `--migrations` may select a separately reviewed artifact set; the
-checksum remains mandatory.
+Every Lambda or CLI invocation supplies an expected migration checksum. Before
+connecting, the migrator recomputes the ordered, length-prefixed hash of the
+complete `db/migrations` artifact set and rejects:
 
-An `up` invocation targeted below migration `000004` applies the requested schema prefix
-but deliberately skips application credential provisioning because the earlier object
-grants do not guarantee database `CONNECT`. Lambda responses report
-`credentials_status: "skipped_target_before_application_connect"` and
-`credentials_repaired: false` in that case. Full ups and targets at or above `000004`
-repair credentials normally.
+- a checksum mismatch;
+- a missing up/down pair or version gap;
+- an unrelated file, directory, or symlink; or
+- a previously applied migration whose recorded checksum changed.
+
+Schema changes and application credential repair share the same advisory lock.
+The owner role creates or repairs a least-privilege runtime role, grants
+database connectivity and object privileges, then publishes that credential
+to Secrets Manager. Runtime components never receive the migration owner
+credential.
+
+The packaged `portscanner-migrator` wheel embeds the same SQL payload.
+`MIGRATIONS_PATH` or `--migrations` may select a separately reviewed set, but
+the checksum remains mandatory.
+
+## Development
+
+From the repository root:
+
+```sh
+uv run --package portscanner-migrator pytest db/migrator/tests
+./tools/test_migrator_package.sh
+./tools/test_postgresql.sh
+```
+
+The PostgreSQL test uses a disposable local container. Migration changes must
+remain reversible, regenerate the deployment checksum through the image build
+flow, and be applied only while dispatch is paused.

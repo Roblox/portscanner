@@ -7,15 +7,3 @@ path = "**"
 precedence = "aggregate"
 SPDX-FileCopyrightText = "2026 Roblox"
 SPDX-License-Identifier = "MIT"
-
-[[annotations]]
-path = "NOTICE"
-precedence = "override"
-SPDX-FileCopyrightText = "2026 Roblox Corporation"
-SPDX-License-Identifier = "Apache-2.0"
-
-[[annotations]]
-path = "operator/**"
-precedence = "override"
-SPDX-FileCopyrightText = "2026 Roblox Corporation"
-SPDX-License-Identifier = "Apache-2.0"

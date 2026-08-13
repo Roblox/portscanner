@@ -479,36 +479,6 @@ def test_newer_idempotent_observation_advances_state_watermark() -> None:
     assert store.get(target.target_id).observed_at == observed_at
 
 
-def test_legacy_state_without_observation_is_conditionally_upgraded() -> None:
-    client = FakeDynamo()
-    store = DynamoStateStore(client, "inventory")
-    target = normalized_target()
-    added = store.reconcile(target, source=_source(), now=NOW)
-    assert added.state is not None
-    key = (f"TARGET#{target.target_id}", "STATE")
-    legacy = client.items[key]
-    legacy.pop("observed_at")
-    target_json = json.loads(legacy["target_json"]["S"])
-    target_json.pop("observed_at")
-    legacy["target_json"]["S"] = json.dumps(
-        target_json,
-        separators=(",", ":"),
-        sort_keys=True,
-    )
-
-    changed_at = NOW + timedelta(minutes=1)
-    result = store.reconcile(
-        normalized_target(public_ip="203.0.113.20"),
-        source=_source(changed_at),
-        now=changed_at,
-    )
-
-    assert result.action is ReconcileAction.CHANGED
-    assert result.state is not None
-    assert result.state.observed_at == changed_at
-    assert client.items[key]["observed_at"]["S"] == "2026-01-02T03:05:05Z"
-
-
 def test_signal_dedupe_uses_ttl_and_can_be_released() -> None:
     client = FakeDynamo()
     store = DynamoStateStore(client, "inventory")

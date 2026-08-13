@@ -32,10 +32,34 @@ variable "enable_event_dispatch" {
   default     = false
 }
 
-variable "enable_automatic_inventory" {
-  description = "Enable recurring inventory and repair schedules after queue and stream dispatch is active."
+variable "periodic_snapshots_enabled" {
+  description = "Enable authoritative periodic snapshot schedules independently."
   type        = bool
   default     = false
+}
+
+variable "periodic_coverage_enabled" {
+  description = "Enable recurring coverage requests and their generator consumer independently."
+  type        = bool
+  default     = false
+}
+
+variable "signal_hints_enabled" {
+  description = "Enable the signal queue consumer independently."
+  type        = bool
+  default     = false
+}
+
+variable "processor_reconciliation_enabled" {
+  description = "Enable scheduled PostgreSQL finding reconciliation independently."
+  type        = bool
+  default     = false
+}
+
+variable "finding_export_enabled" {
+  description = "Enable optional finding handoff creation and S3 publication."
+  type        = bool
+  default     = true
 }
 
 variable "canary_mode" {
@@ -155,6 +179,45 @@ variable "allowed_tag_keys" {
   description = "Shared AWS context tag keys allowed into target contracts."
   type        = set(string)
   default     = []
+}
+
+variable "allowed_eni_interface_types" {
+  description = "Optional supported ENI interface classes; empty preserves existing direct-EC2 onboarding."
+  type        = set(string)
+  default     = []
+}
+
+variable "required_target_tag_key" {
+  description = "Optional exact ENI opt-in tag key paired with required_target_tag_value."
+  type        = string
+  default     = null
+}
+
+variable "required_target_tag_value" {
+  description = "Optional exact ENI opt-in tag value paired with required_target_tag_key."
+  type        = string
+  default     = null
+}
+
+variable "snapshot_max_pages" {
+  description = "Hard per-operation snapshot pagination limit."
+  type        = number
+  default     = 1000
+}
+
+variable "managed_canary" {
+  description = "Trusted Terraform-owned canary identity; null retains the advanced external-canary path."
+  type = object({
+    account_id           = string
+    region               = string
+    network_interface_id = string
+    private_ip           = string
+    public_ip            = string
+    tag_key              = string
+    tag_value            = string
+    tcp_port             = number
+  })
+  default = null
 }
 
 variable "target_event_prefix" {
@@ -330,6 +393,11 @@ variable "processor_schedule_expression" {
 }
 
 locals {
+  effective_periodic_snapshots_enabled       = var.periodic_snapshots_enabled
+  effective_periodic_coverage_enabled        = var.periodic_coverage_enabled
+  effective_signal_hints_enabled             = var.signal_hints_enabled
+  effective_processor_reconciliation_enabled = var.processor_reconciliation_enabled
+
   required_images = toset([
     "inventory",
     "generator",
@@ -350,6 +418,24 @@ locals {
     DISCOVERY_EXTERNAL_ID       = one(local.member_collector_external_id_values)
   })
 
+  managed_canary_environment = var.managed_canary == null ? tomap({}) : tomap({
+    MANAGED_CANARY_ACCOUNT_ID = var.managed_canary.account_id
+    MANAGED_CANARY_REGION     = var.managed_canary.region
+    MANAGED_CANARY_ENI_ID     = var.managed_canary.network_interface_id
+    MANAGED_CANARY_PRIVATE_IP = var.managed_canary.private_ip
+    MANAGED_CANARY_PUBLIC_IP  = var.managed_canary.public_ip
+    MANAGED_CANARY_TAG_KEY    = var.managed_canary.tag_key
+    MANAGED_CANARY_TAG_VALUE  = var.managed_canary.tag_value
+    MANAGED_CANARY_TCP_PORT   = tostring(var.managed_canary.tcp_port)
+  })
+
+  required_target_tag_environment = (
+    var.required_target_tag_key == null || var.required_target_tag_value == null
+    ) ? tomap({}) : tomap({
+      REQUIRED_TARGET_TAG_KEY   = var.required_target_tag_key
+      REQUIRED_TARGET_TAG_VALUE = var.required_target_tag_value
+  })
+
   inventory_environment = merge({
     INVENTORY_TABLE        = var.table_names["inventory"]
     TARGET_EVENT_BUCKET    = var.bucket_names["events"]
@@ -359,13 +445,21 @@ locals {
     AWS_REGIONS            = join(",", var.snapshot_regions)
     AUTHORIZED_ACCOUNT_IDS = join(",", sort(tolist(var.authorized_account_ids)))
     ALLOWED_TAG_KEYS       = join(",", sort(tolist(var.allowed_tag_keys)))
-  }, local.member_discovery_environment)
+    ALLOWED_TARGET_CIDRS   = join(",", sort(tolist(var.allowed_target_cidrs)))
+    DENIED_TARGET_CIDRS    = join(",", sort(tolist(var.denied_target_cidrs)))
+    ALLOWED_ENI_INTERFACE_TYPES = join(
+      ",",
+      sort(tolist(var.allowed_eni_interface_types))
+    )
+    SNAPSHOT_MAX_PAGES = tostring(var.snapshot_max_pages)
+  }, local.member_discovery_environment, local.required_target_tag_environment)
 
   snapshot_environment = merge(
     local.inventory_environment,
     {
       CANARY_MODE = tostring(var.canary_mode)
     },
+    local.managed_canary_environment,
     var.snapshot_backend == "config" ? {
       CONFIG_AGGREGATOR_NAME = var.config_aggregator_name
       } : {
@@ -374,18 +468,25 @@ locals {
   )
 
   generator_environment = merge(local.inventory_environment, {
-    TARGET_EVENT_BUCKET  = var.bucket_names["events"]
-    TARGET_EVENT_PREFIX  = var.target_event_prefix
-    IDEMPOTENCY_TABLE    = var.table_names["dispatch"]
-    INVENTORY_TABLE      = var.table_names["inventory"]
-    EKS_CLUSTER_NAME     = var.eks_cluster_name
-    K8S_NAMESPACE        = var.eks_namespace
-    K8S_API_GROUP        = "scanning.portscanner.io"
-    K8S_API_VERSION      = "v1alpha1"
-    K8S_CRD_PLURAL       = "scanners"
-    ALLOWED_TARGET_CIDRS = join(",", sort(tolist(var.allowed_target_cidrs)))
-    DENIED_TARGET_CIDRS  = join(",", sort(tolist(var.denied_target_cidrs)))
+    TARGET_EVENT_BUCKET = var.bucket_names["events"]
+    TARGET_EVENT_PREFIX = var.target_event_prefix
+    IDEMPOTENCY_TABLE   = var.table_names["dispatch"]
+    INVENTORY_TABLE     = var.table_names["inventory"]
+    EKS_CLUSTER_NAME    = var.eks_cluster_name
+    K8S_NAMESPACE       = var.eks_namespace
+    K8S_API_GROUP       = "scanning.portscanner.io"
+    K8S_API_VERSION     = "v1alpha1"
+    K8S_CRD_PLURAL      = "scanners"
   })
+
+  finding_environment = merge(
+    {
+      FINDING_EXPORT_ENABLED = tostring(var.finding_export_enabled)
+    },
+    var.finding_export_enabled ? {
+      FINDING_BUCKET = var.bucket_names["findings"]
+    } : {}
+  )
 
   function_definitions = {
     snapshot = {
@@ -448,12 +549,11 @@ locals {
       command = "act_parser.target_handler.lambda_handler"
       timeout = var.lambda_timeout_seconds
       memory  = var.memory_size_mb
-      environment = {
+      environment = merge({
         TARGET_EVENT_BUCKET = var.bucket_names["events"]
         TARGET_EVENT_PREFIX = var.target_event_prefix
-        FINDING_BUCKET      = var.bucket_names["findings"]
         DB_SECRET_ID        = var.database_application_secret_arn
-      }
+      }, local.finding_environment)
     }
     parser = {
       image   = "parser"
@@ -461,12 +561,11 @@ locals {
       command = "act_parser.handler.lambda_handler"
       timeout = var.lambda_timeout_seconds
       memory  = var.memory_size_mb
-      environment = {
+      environment = merge({
         SCAN_RESULT_BUCKET = var.bucket_names["results"]
         RAW_RESULT_BUCKET  = var.bucket_names["results"]
-        FINDING_BUCKET     = var.bucket_names["findings"]
         DB_SECRET_ID       = var.database_application_secret_arn
-      }
+      }, local.finding_environment)
     }
     processor = {
       image   = "processor"
@@ -474,10 +573,13 @@ locals {
       command = "act_processor.handler.lambda_handler"
       timeout = var.lambda_timeout_seconds
       memory  = var.memory_size_mb
-      environment = {
-        FINDING_BUCKET = var.bucket_names["findings"]
-        DB_SECRET_ID   = var.database_application_secret_arn
-      }
+      environment = merge(
+        {
+          DB_SECRET_ID = var.database_application_secret_arn
+        },
+        local.finding_environment,
+        local.managed_canary_environment
+      )
     }
     migrator = {
       image   = "migrator"
@@ -518,7 +620,10 @@ locals {
       queue    = "result"
     }
   }
-  automatic_sqs_mappings = toset(["signals", "generator_coverage"])
+  staged_sqs_mapping_enabled = {
+    signals            = local.effective_signal_hints_enabled
+    generator_coverage = local.effective_periodic_coverage_enabled
+  }
 
   snapshot_scope_account_ids = length(var.authorized_account_ids) > 0 ? var.authorized_account_ids : toset([
     var.snapshot_account_id
@@ -528,7 +633,7 @@ locals {
     "snapshot-${account_id}" => {
       expression = var.snapshot_schedule_expression
       function   = "snapshot"
-      gate       = "automatic"
+      gate       = "periodic-snapshots"
       input = {
         account_id = account_id
       }
@@ -538,13 +643,13 @@ locals {
     rescan = {
       expression = var.rescan_schedule_expression
       function   = "rescan"
-      gate       = "automatic"
+      gate       = "periodic-coverage"
       input      = null
     }
     processor = {
       expression = var.processor_schedule_expression
       function   = "processor"
-      gate       = "automatic"
+      gate       = "processor-reconciliation"
       input      = null
     }
     "outbox-replay" = {
@@ -585,17 +690,30 @@ resource "terraform_data" "runtime_validation" {
     }
 
     precondition {
-      condition     = !var.enable_automatic_inventory || var.enable_event_dispatch
-      error_message = "enable_automatic_inventory requires enable_event_dispatch."
+      condition = !(
+        local.effective_periodic_snapshots_enabled ||
+        local.effective_periodic_coverage_enabled ||
+        local.effective_signal_hints_enabled
+      ) || var.enable_event_dispatch
+      error_message = "Periodic snapshots, coverage, and signal hints require enable_event_dispatch."
+    }
+
+    precondition {
+      condition = !local.effective_processor_reconciliation_enabled || (
+        var.deploy_runtime && var.run_migration
+      )
+      error_message = "Processor reconciliation requires deployed, migrated runtime."
     }
 
     precondition {
       condition = !var.canary_mode || (
         var.deploy_runtime &&
         var.run_migration &&
-        !var.enable_automatic_inventory
+        !local.effective_periodic_snapshots_enabled &&
+        !local.effective_periodic_coverage_enabled &&
+        !local.effective_signal_hints_enabled
       )
-      error_message = "canary_mode requires migrated runtime and automatic inventory disabled."
+      error_message = "canary_mode requires migrated runtime with recurring inventory and signal hints disabled."
     }
 
     precondition {
@@ -644,6 +762,44 @@ resource "terraform_data" "runtime_validation" {
         toset(["application", "environment", "name", "service"])
       )) == 0
       error_message = "allowed_tag_keys contains a key outside the shared AWS contract."
+    }
+
+    precondition {
+      condition = (
+        var.required_target_tag_key == null &&
+        var.required_target_tag_value == null
+        ) || (
+        try(length(var.required_target_tag_key) > 0, false) &&
+        try(length(var.required_target_tag_value) > 0, false)
+      )
+      error_message = "required_target_tag_key and required_target_tag_value must be configured together."
+    }
+
+    precondition {
+      condition     = var.snapshot_max_pages >= 1 && var.snapshot_max_pages <= 10000
+      error_message = "snapshot_max_pages must be between 1 and 10000."
+    }
+
+    precondition {
+      condition = var.managed_canary == null ? true : (
+        var.managed_canary.tcp_port == 18080 &&
+        (
+          !var.canary_mode ||
+          (
+            contains(var.authorized_account_ids, var.managed_canary.account_id) &&
+            contains(var.snapshot_regions, var.managed_canary.region) &&
+            contains(var.allowed_target_cidrs, "${var.managed_canary.public_ip}/32")
+          )
+        )
+      )
+      error_message = "Canary mode requires the managed canary to be the authorized exact /32 target on TCP 18080."
+    }
+
+    precondition {
+      condition = !var.finding_export_enabled || (
+        contains(keys(var.bucket_names), "findings")
+      )
+      error_message = "finding_export_enabled requires the findings bucket."
     }
 
     precondition {
@@ -782,9 +938,11 @@ resource "aws_lambda_event_source_mapping" "sqs" {
 
   event_source_arn = var.queue_arns[each.value.queue]
   function_name    = aws_lambda_function.this[each.value.function].arn
-  enabled = contains(local.automatic_sqs_mappings, each.key) ? (
-    var.enable_automatic_inventory
-  ) : var.enable_event_dispatch
+  enabled = lookup(
+    local.staged_sqs_mapping_enabled,
+    each.key,
+    var.enable_event_dispatch
+  )
   batch_size = 5
 
   function_response_types = ["ReportBatchItemFailures"]
@@ -856,9 +1014,12 @@ resource "aws_cloudwatch_event_rule" "schedule" {
   name                = "${var.name_prefix}-${each.key}-schedule"
   description         = "Conservative ${each.key} schedule"
   schedule_expression = each.value.expression
-  state = each.value.gate == "dispatch" ? (
-    var.enable_event_dispatch ? "ENABLED" : "DISABLED"
-  ) : (var.enable_automatic_inventory ? "ENABLED" : "DISABLED")
+  state = (
+    each.value.gate == "dispatch" ? var.enable_event_dispatch :
+    each.value.gate == "periodic-snapshots" ? local.effective_periodic_snapshots_enabled :
+    each.value.gate == "periodic-coverage" ? local.effective_periodic_coverage_enabled :
+    local.effective_processor_reconciliation_enabled
+  ) ? "ENABLED" : "DISABLED"
 }
 
 resource "aws_cloudwatch_event_target" "schedule" {
@@ -885,6 +1046,36 @@ resource "aws_lambda_permission" "schedule" {
 
 output "function_arns" {
   value = { for name, function in aws_lambda_function.this : name => function.arn }
+}
+
+output "function_names" {
+  value = { for name, function in aws_lambda_function.this : name => function.function_name }
+}
+
+output "snapshot_function_arn" {
+  value = try(aws_lambda_function.this["snapshot"].arn, null)
+}
+
+output "snapshot_function_name" {
+  value = try(aws_lambda_function.this["snapshot"].function_name, null)
+}
+
+output "processor_function_arn" {
+  value = try(aws_lambda_function.this["processor"].arn, null)
+}
+
+output "processor_function_name" {
+  value = try(aws_lambda_function.this["processor"].function_name, null)
+}
+
+output "stage_gates" {
+  value = {
+    periodic_snapshots_enabled       = local.effective_periodic_snapshots_enabled
+    periodic_coverage_enabled        = local.effective_periodic_coverage_enabled
+    signal_hints_enabled             = local.effective_signal_hints_enabled
+    processor_reconciliation_enabled = local.effective_processor_reconciliation_enabled
+    finding_export_enabled           = var.finding_export_enabled
+  }
 }
 
 output "event_source_mapping_uuids" {

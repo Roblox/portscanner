@@ -61,8 +61,9 @@ run "disabled_cloudtrail_keeps_only_native_local_state_hint" {
   command = plan
 
   variables {
-    config_mode     = "disabled"
-    cloudtrail_mode = "disabled"
+    config_mode            = "disabled"
+    cloudtrail_mode        = "disabled"
+    cloudtrail_bucket_name = null
   }
 
   assert {

@@ -24,7 +24,7 @@ def test_target_event_accepts_a_decoded_json_mapping() -> None:
 
     event = TargetEvent.model_validate(payload)
 
-    assert event.target.address == "192.0.2.44"
+    assert event.target.public_address == "192.0.2.44"
     assert event.trace_id == event.event_id
     assert event.provider == event.target.provider
 

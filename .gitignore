@@ -27,6 +27,7 @@ htmlcov/
 *.local
 
 # Terraform state, plans, local variables, and provider caches
+/.portscanner/
 **/.terraform/
 *.tfstate
 *.tfstate.*

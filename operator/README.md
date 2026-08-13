@@ -1,11 +1,11 @@
 <!--
-Copyright 2026 Roblox Corporation
-SPDX-License-Identifier: Apache-2.0
+SPDX-FileCopyrightText: 2026 Portscanner contributors
+SPDX-License-Identifier: MIT
 -->
 
 # Portscanner Kubernetes Operator
 
-This directory is the public, Apache-2.0-licensed Kubernetes operator boundary
+This directory is the public, MIT-licensed Kubernetes operator boundary
 for `github.com/Roblox/portscanner/operator`. It defines the
 `scanning.portscanner.io/v1alpha1` `Scanner` API and creates one bounded
 Kubernetes Job for each accepted Scanner resource.
@@ -46,8 +46,6 @@ The configured scanner image receives these arguments:
 - `--target=<address>`
 - `--profile=fast-full-tcp|targeted-tcp|deep`
 - `--tcp-ports=<normalized explicit coverage>`
-- `--scan-mode=fast|targeted|deep`
-- `--service-detection` for the `deep` profile
 
 `fast-full-tcp` always uses `1-65535`. `targeted-tcp` requires ports or ranges.
 `deep` uses supplied coverage or explicitly defaults to `1-65535`. Explicit
@@ -78,19 +76,10 @@ external destination and exit zero on success or non-zero on failure.
 
 ## Install
 
-Build and deploy the Kustomize base:
-
-```sh
-make docker-build IMG=portscanner-operator:your-tag
-# Set images and environment-specific arguments in a Kustomize overlay.
-kubectl apply -k config/default
-```
-
-The base's `portscanner-system` namespace is an overridable Kustomize default;
-the controller itself never assumes an operator or Scanner namespace. Scanner
-Jobs are created in the Scanner resource's namespace.
-
-Install with Helm:
+Helm is the only supported installation surface. The canonical AWS deployment
+installs this chart after its database migration succeeds. For standalone
+development, supply immutable operator/scanner images and an existing result
+bucket:
 
 ```sh
 helm install portscanner ./chart/portscanner \
@@ -120,6 +109,10 @@ namespace is embedded in Scanner resource data; the chart pins the controller's
 single namespace explicitly. The all-zero operator/scanner digests and placeholder
 result bucket in the default values are render-only
 placeholders and must be replaced before deployment.
+
+The controller itself never assumes a fixed namespace. Scanner Jobs are
+created in the Helm release namespace selected by Terraform or the standalone
+Helm command.
 
 ## Security
 

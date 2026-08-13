@@ -105,9 +105,8 @@ run "canary_enables_pipeline_without_automatic_inventory" {
   command = plan
 
   variables {
-    enable_event_dispatch      = true
-    enable_automatic_inventory = false
-    canary_mode                = true
+    enable_event_dispatch = true
+    canary_mode           = true
   }
 
   assert {
@@ -141,9 +140,8 @@ run "paused_canary_retains_runtime_guard_with_dispatch_disabled" {
   command = plan
 
   variables {
-    enable_event_dispatch      = false
-    enable_automatic_inventory = false
-    canary_mode                = true
+    enable_event_dispatch = false
+    canary_mode           = true
   }
 
   assert {
@@ -164,7 +162,7 @@ run "automatic_inventory_requires_dispatch_pipeline" {
 
   variables {
     enable_event_dispatch      = false
-    enable_automatic_inventory = true
+    periodic_snapshots_enabled = true
   }
 
   expect_failures = [terraform_data.runtime_validation]
@@ -174,8 +172,11 @@ run "activation_enables_recurring_schedules" {
   command = plan
 
   variables {
-    enable_event_dispatch      = true
-    enable_automatic_inventory = true
+    enable_event_dispatch            = true
+    periodic_snapshots_enabled       = true
+    periodic_coverage_enabled        = true
+    signal_hints_enabled             = true
+    processor_reconciliation_enabled = true
   }
 
   assert {
@@ -190,5 +191,125 @@ run "activation_enables_recurring_schedules" {
       ])
     )
     error_message = "Full activation must enable every recurring schedule."
+  }
+}
+
+run "independent_stage_gates_control_each_recurring_path" {
+  command = plan
+
+  variables {
+    enable_event_dispatch            = true
+    periodic_snapshots_enabled       = false
+    periodic_coverage_enabled        = true
+    signal_hints_enabled             = false
+    processor_reconciliation_enabled = true
+    finding_export_enabled           = false
+  }
+
+  assert {
+    condition = (
+      aws_lambda_event_source_mapping.sqs["signals"].enabled == false &&
+      aws_lambda_event_source_mapping.sqs["generator_coverage"].enabled &&
+      alltrue([
+        for name, rule in aws_cloudwatch_event_rule.schedule :
+        rule.state == (
+          startswith(name, "snapshot-") ? "DISABLED" :
+          name == "rescan" ? "ENABLED" :
+          name == "processor" ? "ENABLED" :
+          "ENABLED"
+        )
+      ])
+    )
+    error_message = "Each recurring stage must follow its own explicit gate."
+  }
+
+  assert {
+    condition = (
+      aws_lambda_function.this["parser"].environment[0].variables["FINDING_EXPORT_ENABLED"] == "false" &&
+      !contains(keys(aws_lambda_function.this["parser"].environment[0].variables), "FINDING_BUCKET") &&
+      !contains(keys(aws_lambda_function.this["target_projector"].environment[0].variables), "FINDING_BUCKET") &&
+      !contains(keys(aws_lambda_function.this["processor"].environment[0].variables), "FINDING_BUCKET")
+    )
+    error_message = "Database-only runtimes must not require a finding bucket environment variable."
+  }
+}
+
+run "managed_canary_identity_is_trusted_runtime_configuration" {
+  command = plan
+
+  variables {
+    enable_event_dispatch = true
+    canary_mode           = true
+    allowed_tag_keys      = ["application", "service"]
+    managed_canary = {
+      account_id           = "123456789012"
+      region               = "us-east-1"
+      network_interface_id = "eni-0123456789abcdef0"
+      private_ip           = "10.255.255.4"
+      public_ip            = "203.0.113.10"
+      tag_key              = "service"
+      tag_value            = "test-managed-canary"
+      tcp_port             = 18080
+    }
+  }
+
+  assert {
+    condition = (
+      aws_lambda_function.this["snapshot"].environment[0].variables["MANAGED_CANARY_ENI_ID"] == "eni-0123456789abcdef0" &&
+      aws_lambda_function.this["snapshot"].environment[0].variables["MANAGED_CANARY_TCP_PORT"] == "18080" &&
+      aws_lambda_function.this["processor"].environment[0].variables["MANAGED_CANARY_PUBLIC_IP"] == "203.0.113.10"
+    )
+    error_message = "Snapshot and status operations must use Terraform-owned canary identity."
+  }
+}
+
+run "processor_reconciliation_is_independent_of_dispatch" {
+  command = plan
+
+  variables {
+    enable_event_dispatch            = false
+    periodic_snapshots_enabled       = false
+    periodic_coverage_enabled        = false
+    signal_hints_enabled             = false
+    processor_reconciliation_enabled = true
+  }
+
+  assert {
+    condition = (
+      aws_cloudwatch_event_rule.schedule["processor"].state == "ENABLED" &&
+      aws_cloudwatch_event_rule.schedule["outbox-replay"].state == "DISABLED" &&
+      alltrue([
+        for mapping in values(aws_lambda_event_source_mapping.sqs) :
+        mapping.enabled == false
+      ]) &&
+      aws_lambda_event_source_mapping.outbox[0].enabled == false
+    )
+    error_message = "Database reconciliation must be independently schedulable without dispatch."
+  }
+}
+
+run "managed_target_does_not_narrow_normal_inventory_scope" {
+  command = plan
+
+  variables {
+    allowed_target_cidrs = []
+    managed_canary = {
+      account_id           = "123456789012"
+      region               = "us-east-1"
+      network_interface_id = "eni-0123456789abcdef0"
+      private_ip           = "10.255.255.4"
+      public_ip            = "203.0.113.10"
+      tag_key              = "service"
+      tag_value            = "test-managed-canary"
+      tcp_port             = 18080
+    }
+  }
+
+  assert {
+    condition = (
+      aws_lambda_function.this["snapshot"].environment[0].variables["CANARY_MODE"] == "false" &&
+      aws_lambda_function.this["snapshot"].environment[0].variables["ALLOWED_TARGET_CIDRS"] == ""
+    )
+    error_message = "A retained managed canary must not silently narrow advanced normal-inventory scope."
   }
 }

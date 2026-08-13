@@ -38,7 +38,7 @@ updates:
 
   - package-ecosystem: terraform
     directories:
-      - /terraform/aws/examples/created-vpc
+      - /terraform/aws/deployment
       - /terraform/aws/examples/existing-vpc
       - /terraform/aws/examples/member-account
       - /terraform/aws/examples/multi-account-central

@@ -318,8 +318,10 @@ def _process_scan_result(
                 enrichment_result_version=enrichment_version,
                 finding_bucket=settings.finding_bucket,
                 xml_completion_validated=xml_completion_validated,
+                queue_finding_handoffs=settings.finding_export_enabled,
             )
-            HandoffPublisher(s3, repository).publish_all(keys=result.handoff_keys)
+            if settings.finding_export_enabled:
+                HandoffPublisher(s3, repository).publish_all(keys=result.handoff_keys)
     except AttemptConflictError as error:
         raise PermanentRecordError("attempt identity conflict") from error
     except UnknownTargetError as error:

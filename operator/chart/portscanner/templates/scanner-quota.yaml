@@ -1,6 +1,6 @@
 {{/*
-Copyright 2026 Roblox Corporation
-SPDX-License-Identifier: Apache-2.0
+SPDX-FileCopyrightText: 2026 Portscanner contributors
+SPDX-License-Identifier: MIT
 */}}
 {{- $root := . -}}
 {{- if or (lt (int .Values.scanner.maxConcurrentPods) 1) (gt (int .Values.scanner.maxConcurrentPods) 100) -}}

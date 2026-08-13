@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Final
 
 ROOT: Final = Path(__file__).resolve().parents[1]
-LEGAL_FILES: Final = ("LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md")
+LEGAL_FILES: Final = ("LICENSE", "THIRD_PARTY_NOTICES.md")
 IMAGE_CHECK: Final = r"""
 import hashlib
 import importlib

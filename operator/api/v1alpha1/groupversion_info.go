@@ -1,5 +1,5 @@
-// Copyright 2026 Roblox Corporation
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Portscanner contributors
+// SPDX-License-Identifier: MIT
 
 // Package v1alpha1 contains the public Scanner API.
 // +kubebuilder:object:generate=true

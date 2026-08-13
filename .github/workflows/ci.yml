@@ -102,57 +102,6 @@ jobs:
           PORTSCANNER_TEST_PYTHON: ${{ github.workspace }}/.venv/bin/python
         run: make -C operator test-envtest
 
-  schemas:
-    name: JSON schemas
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7.0.1
-
-      - uses: actions/setup-python@v7.0.0
-        with:
-          python-version: "3.12"
-
-      - name: Install uv
-        run: python -m pip install --disable-pip-version-check "uv==0.11.30"
-
-      - name: Install schema dependencies
-        shell: bash
-        run: |
-          set -euo pipefail
-          uv sync --frozen --all-packages --group dev
-
-      - name: Validate schema documents
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ ! -d schemas ]]; then
-            echo "No schemas directory is present."
-            exit 0
-          fi
-          uv run python - <<'PY'
-          import json
-          from pathlib import Path
-
-          from jsonschema.validators import validator_for
-
-          schemas = sorted(Path("schemas").glob("*.schema.json"))
-          if not schemas:
-              raise SystemExit("schemas directory contains no *.schema.json files")
-          for path in schemas:
-              schema = json.loads(path.read_text(encoding="utf-8"))
-              validator_for(schema).check_schema(schema)
-              print(f"validated {path}")
-          PY
-
-      - name: Run schema contract tests
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ -f contracts/tests/test_schemas.py ]]; then
-            uv run --package portscanner-contracts \
-              pytest contracts/tests/test_schemas.py
-          fi
-
   generated-drift:
     name: Generated drift
     runs-on: ubuntu-latest

@@ -1,5 +1,5 @@
-// Copyright 2026 Roblox Corporation
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Portscanner contributors
+// SPDX-License-Identifier: MIT
 
 package controller
 
@@ -33,7 +33,6 @@ func TestScannerArgumentsMapProfilesAndCoverage(t *testing.T) {
 				"--target=192.0.2.10",
 				"--profile=fast-full-tcp",
 				"--tcp-ports=1-65535",
-				"--scan-mode=fast",
 			},
 		},
 		{
@@ -45,7 +44,6 @@ func TestScannerArgumentsMapProfilesAndCoverage(t *testing.T) {
 				"--target=192.0.2.10",
 				"--profile=targeted-tcp",
 				"--tcp-ports=80-84,443",
-				"--scan-mode=targeted",
 			},
 		},
 		{
@@ -55,8 +53,6 @@ func TestScannerArgumentsMapProfilesAndCoverage(t *testing.T) {
 				"--target=192.0.2.10",
 				"--profile=deep",
 				"--tcp-ports=1-65535",
-				"--scan-mode=deep",
-				"--service-detection",
 			},
 		},
 		{

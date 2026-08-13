@@ -15,7 +15,7 @@ from .config import database_settings_from_environment
 from .credentials import DEFAULT_APPLICATION_USERNAME, provision_application_credentials
 from .migrator import MigrationError, Migrator, discover_migrations, migration_set_checksum
 
-APPLICATION_CONNECT_MIGRATION_VERSION = "000004"
+APPLICATION_CONNECT_MIGRATION_VERSION = "000001"
 
 
 def default_migrations_path() -> Path:
@@ -35,7 +35,7 @@ def default_migrations_path() -> Path:
 
 
 def target_supports_credential_provisioning(target: str | None) -> bool:
-    """A partial up below explicit CONNECT cannot safely provision credentials."""
+    """The fresh-install baseline includes explicit database CONNECT grants."""
     return target is None or target >= APPLICATION_CONNECT_MIGRATION_VERSION
 
 

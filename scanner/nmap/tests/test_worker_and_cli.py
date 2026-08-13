@@ -392,8 +392,6 @@ def test_cli_runs_with_fake_nmap_and_s3(
         "targeted-tcp",
         "--tcp-ports",
         "80-82",
-        "--scan-mode",
-        "targeted",
         "--event-id",
         "1" * 64,
         "--directive-id",

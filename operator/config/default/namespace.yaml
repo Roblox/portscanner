@@ -1,9 +1,0 @@
-# Copyright 2026 Roblox Corporation
-# SPDX-License-Identifier: Apache-2.0
-
-apiVersion: v1
-kind: Namespace
-metadata:
-  name: portscanner-system
-  labels:
-    app.kubernetes.io/name: portscanner

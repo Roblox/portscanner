@@ -5,7 +5,7 @@ TEST_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
 SCRIPT_DIR="$(CDPATH= cd -- "${TEST_DIR}/.." && pwd -P)"
 AWS_DIR="$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd -P)"
 PAUSE_SCRIPT="${SCRIPT_DIR}/emergency-pause.sh"
-TF_ROOT="${AWS_DIR}/examples/created-vpc"
+TF_ROOT="${AWS_DIR}/deployment"
 
 fail() {
   echo "FAIL: $*" >&2

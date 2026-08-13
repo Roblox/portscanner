@@ -4,7 +4,6 @@
 UV ?= uv
 PYTHON ?= python3
 HELM ?= helm
-KUBECTL ?= kubectl
 KUBECONFORM ?= kubeconform
 PORTSCANNER_TEST_PYTHON ?= $(CURDIR)/.venv/bin/python
 
@@ -102,6 +101,8 @@ secret-scan:
 	gitleaks dir --redact --config .gitleaks.toml .
 
 terraform-script-tests:
+	./terraform/aws/scripts/tests/bootstrap-test.sh
+	./terraform/aws/scripts/tests/canary-helpers-test.sh
 	./terraform/aws/scripts/tests/deploy-test.sh
 	./terraform/aws/scripts/tests/emergency-pause-test.sh
 	./terraform/aws/scripts/tests/build-images-test.sh
@@ -119,18 +120,6 @@ kubernetes-validate:
 		--output-directory "$$schema_dir" \
 		$$(git ls-files 'operator/config/crd/bases/*.yaml'); \
 	count=0; \
-	for file in $$(git ls-files 'kustomization.yaml' '**/kustomization.yaml'); do \
-		rendered="$$work_dir/kustomize-$$count.yaml"; \
-		$(KUBECTL) kustomize "$$(dirname "$$file")" >"$$rendered"; \
-		for version in 1.35.0 1.36.0; do \
-			$(KUBECONFORM) -strict -summary -skip CustomResourceDefinition \
-				-kubernetes-version "$$version" \
-				-schema-location default \
-				-schema-location "$$schema_dir/{{.ResourceKind}}_{{.ResourceAPIVersion}}.json" \
-				"$$rendered"; \
-		done; \
-		count=$$((count + 1)); \
-	done; \
 	for sample in $$(git ls-files 'operator/config/samples/*.yaml'); do \
 		for version in 1.35.0 1.36.0; do \
 			$(KUBECONFORM) -strict -summary \

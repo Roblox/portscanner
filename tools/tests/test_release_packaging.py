@@ -35,6 +35,28 @@ def requirement_records(content: str) -> list[str]:
 
 
 class ReleasePackagingTests(unittest.TestCase):
+    def test_release_version_is_consistent(self) -> None:
+        workspace = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
+        version = workspace["project"]["version"]
+        self.assertEqual(version, "1.0.0")
+
+        for component in (*COMPONENTS, "contracts"):
+            with self.subTest(component=component):
+                metadata = tomllib.loads(
+                    (ROOT / component / "pyproject.toml").read_text(encoding="utf-8")
+                )["project"]
+                self.assertEqual(metadata["version"], version)
+
+        scanner_init = (ROOT / "scanner/nmap/src/portscanner_scanner/__init__.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(f'__version__ = "{version}"', scanner_init)
+
+        chart = (ROOT / "operator/chart/portscanner/Chart.yaml").read_text(encoding="utf-8")
+        self.assertIn(f"version: {version}", chart)
+        self.assertIn(f'appVersion: "{version}"', chart)
+        self.assertIn(f"## [{version}]", (ROOT / "CHANGELOG.md").read_text(encoding="utf-8"))
+
     def test_component_metadata_packages_the_repository_license(self) -> None:
         repository_license = (ROOT / "LICENSE").read_bytes()
         for component in (*COMPONENTS, "contracts"):
@@ -46,6 +68,22 @@ class ReleasePackagingTests(unittest.TestCase):
                 self.assertEqual(metadata["license"], "MIT")
                 self.assertEqual(metadata["license-files"], ["LICENSE"])
                 self.assertEqual((component_root / "LICENSE").read_bytes(), repository_license)
+
+    def test_operator_image_packages_repository_legal_files(self) -> None:
+        operator_root = ROOT / "operator"
+        self.assertEqual((operator_root / "LICENSE").read_bytes(), (ROOT / "LICENSE").read_bytes())
+        self.assertEqual(
+            (operator_root / "THIRD_PARTY_NOTICES.md").read_bytes(),
+            (ROOT / "THIRD_PARTY_NOTICES.md").read_bytes(),
+        )
+        dockerfile = (operator_root / "Dockerfile").read_text(encoding="utf-8")
+        self.assertIn('org.opencontainers.image.licenses="MIT"', dockerfile)
+        self.assertIn("COPY --from=builder /workspace/LICENSE /licenses/LICENSE", dockerfile)
+        self.assertIn(
+            "COPY --from=builder /workspace/THIRD_PARTY_NOTICES.md "
+            "/licenses/THIRD_PARTY_NOTICES.md",
+            dockerfile,
+        )
 
     def test_runtime_exports_are_exact_hash_pins(self) -> None:
         for component in COMPONENTS:
@@ -84,7 +122,7 @@ class ReleasePackagingTests(unittest.TestCase):
                 self.assertIn("--no-build-isolation", dockerfile)
                 self.assertIn("--no-deps", dockerfile)
                 self.assertIn(
-                    "COPY LICENSE NOTICE THIRD_PARTY_NOTICES.md /licenses/",
+                    "COPY LICENSE THIRD_PARTY_NOTICES.md /licenses/",
                     dockerfile,
                 )
                 self.assertIn("USER 65532:65532", dockerfile)
@@ -120,6 +158,8 @@ class ReleasePackagingTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/containers.yml").read_text(encoding="utf-8")
         for path in (
             '".dockerignore"',
+            '"LICENSE"',
+            '"THIRD_PARTY_NOTICES.md"',
             '"contracts/**"',
             '"db/migrations/**"',
             '"uv.lock"',
@@ -128,6 +168,7 @@ class ReleasePackagingTests(unittest.TestCase):
         ):
             with self.subTest(path=path):
                 self.assertIn(path, workflow)
+        self.assertNotIn('      - "NOTICE"', workflow)
 
 
 if __name__ == "__main__":

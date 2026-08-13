@@ -74,6 +74,12 @@ variable "finding_object_prefix" {
   default     = "findings/"
 }
 
+variable "finding_export_enabled" {
+  description = "Grant finding-object publication only when the optional export integration exists."
+  type        = bool
+  default     = true
+}
+
 data "aws_caller_identity" "current" {}
 data "aws_partition" "current" {}
 data "aws_region" "current" {}
@@ -309,7 +315,7 @@ locals {
         Resource = var.member_collector_role_arns
       }
     ])
-    target_projector = [
+    target_projector = concat([
       {
         Sid    = "ConsumeTargetEvents"
         Effect = "Allow"
@@ -329,7 +335,8 @@ locals {
           "s3:GetObjectVersion"
         ]
         Resource = ["${var.bucket_arns["events"]}/${var.target_event_object_prefix}*"]
-      },
+      }
+      ], var.finding_export_enabled ? [
       {
         Sid    = "PublishFindingObjects"
         Effect = "Allow"
@@ -338,15 +345,16 @@ locals {
           "s3:PutObject"
         ]
         Resource = ["${var.bucket_arns["findings"]}/${var.finding_object_prefix}*"]
-      },
+      }
+      ] : [], [
       {
         Sid      = "ReadApplicationDatabaseCredential"
         Effect   = "Allow"
         Action   = ["secretsmanager:GetSecretValue"]
         Resource = [var.database_application_secret_arn]
       }
-    ]
-    parser = [
+    ])
+    parser = concat([
       {
         Sid    = "ConsumeScanResults"
         Effect = "Allow"
@@ -366,7 +374,8 @@ locals {
           "s3:GetObjectVersion"
         ]
         Resource = ["${var.bucket_arns["results"]}/${var.result_object_prefix}*"]
-      },
+      }
+      ], var.finding_export_enabled ? [
       {
         Sid    = "PublishFindingObjects"
         Effect = "Allow"
@@ -375,15 +384,16 @@ locals {
           "s3:PutObject"
         ]
         Resource = ["${var.bucket_arns["findings"]}/${var.finding_object_prefix}*"]
-      },
+      }
+      ] : [], [
       {
         Sid      = "ReadApplicationDatabaseCredential"
         Effect   = "Allow"
         Action   = ["secretsmanager:GetSecretValue"]
         Resource = [var.database_application_secret_arn]
       }
-    ]
-    processor = [
+    ])
+    processor = concat(var.finding_export_enabled ? [
       {
         Sid    = "PublishFindingObjects"
         Effect = "Allow"
@@ -392,14 +402,15 @@ locals {
           "s3:PutObject"
         ]
         Resource = ["${var.bucket_arns["findings"]}/${var.finding_object_prefix}*"]
-      },
+      }
+      ] : [], [
       {
         Sid      = "ReadApplicationDatabaseCredential"
         Effect   = "Allow"
         Action   = ["secretsmanager:GetSecretValue"]
         Resource = [var.database_application_secret_arn]
       }
-    ]
+    ])
     migrator = [
       {
         Sid    = "ReadMasterCredential"

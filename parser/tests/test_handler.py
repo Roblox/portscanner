@@ -4,6 +4,7 @@ import hashlib
 import json
 from dataclasses import replace
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -329,3 +330,66 @@ def test_editable_rule_configuration_errors_are_retryable(
             envelope_key="result.json",
             envelope_version=None,
         )
+
+
+def test_finding_export_disabled_commits_database_without_publisher(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = Settings(
+        scan_result_bucket="scan-result-test",
+        raw_result_bucket="raw-result-test",
+        finding_bucket=None,
+        database_dsn="unused",
+        finding_export_enabled=False,
+    )
+    envelope = _envelope("partial")
+    ingest_calls: list[dict[str, Any]] = []
+
+    class ConnectionContext:
+        def __enter__(self) -> object:
+            return object()
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    class DatabaseOnlyRepository:
+        def __init__(self, _connection: object) -> None:
+            pass
+
+        def ingest_scan(self, *_args: Any, **kwargs: Any) -> object:
+            ingest_calls.append(kwargs)
+            return SimpleNamespace(handoff_keys=())
+
+    class MustNotPublish:
+        def __init__(self, *_args: object) -> None:
+            raise AssertionError("finding export disabled constructed a publisher")
+
+    monkeypatch.setattr(
+        handler,
+        "_get_object",
+        lambda *_args, **_kwargs: (b"{}", hashlib.sha256(b"{}").hexdigest(), None),
+    )
+    monkeypatch.setattr(handler, "validate_scan_result", lambda _payload: {})
+    monkeypatch.setattr(
+        handler.ScanEnvelope,
+        "from_mapping",
+        classmethod(lambda _cls, _payload: envelope),
+    )
+    monkeypatch.setattr(
+        handler,
+        "_load_observations",
+        lambda **_kwargs: ([], None, None, False),
+    )
+    monkeypatch.setattr(handler.psycopg, "connect", lambda _dsn: ConnectionContext())
+    monkeypatch.setattr(handler, "Repository", DatabaseOnlyRepository)
+    monkeypatch.setattr(handler, "HandoffPublisher", MustNotPublish)
+
+    handler._process_scan_result(
+        s3=object(),
+        settings=settings,
+        envelope_key="result.json",
+        envelope_version=None,
+    )
+
+    assert ingest_calls[0]["finding_bucket"] is None
+    assert ingest_calls[0]["queue_finding_handoffs"] is False

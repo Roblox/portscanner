@@ -39,14 +39,18 @@ python3 tools/sanitize.py --working-tree
 pre-commit run --all-files
 ```
 
-See [docs/testing.md](docs/testing.md) for component, schema, generated, Terraform,
-Kubernetes, container, and integration checks.
+The root `Makefile` is the command index for component, schema, generated,
+Terraform, Helm, container, and integration checks. Run `make ci` before
+requesting review and `make containers` when an image or runtime dependency
+changes.
 
 ## Design rules
 
 - Keep **DISCOVER → PRIORITIZE → VERIFY → ACT** boundaries explicit.
 - Snapshot-driven inventory is authoritative; event-driven signals are hints.
-- Apply removals only after a complete snapshot.
+- Apply removals only after absence from a complete snapshot or an
+  authoritative resource-specific reread. Partial snapshots and raw signals
+  never remove targets.
 - Use stable Target identity and monotonic generations.
 - Revalidate ownership immediately before dispatch.
 - Preserve periodic known-door reconciliation while priority work advances.
@@ -56,8 +60,8 @@ Kubernetes, container, and integration checks.
 - Default dispatch off and account/CIDR allowlists empty.
 - Minimize and redact provider metadata.
 
-Read [docs/adding-sources.md](docs/adding-sources.md) before adding an inventory or signal
-adapter.
+Read [inventory/README.md](inventory/README.md) before adding an inventory or
+signal adapter.
 
 ## Fixtures and examples
 

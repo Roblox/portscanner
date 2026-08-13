@@ -1,220 +1,220 @@
-# Portable AWS deployment
+<!--
+SPDX-FileCopyrightText: 2026 Portscanner contributors
+SPDX-License-Identifier: MIT
+-->
 
-This tree deploys a portable, digest-pinned pipeline:
+# AWS deployment
 
-`AWS Config or EC2 snapshot + filtered EC2 hints -> inventory Lambda + single-table DynamoDB outbox -> immutable S3 target events -> generator and database projector Lambdas -> private EKS operator/Nmap jobs -> filtered S3 result notification -> parser Lambda -> private Aurora PostgreSQL`
+This directory deploys the complete AWS-hosted Portscanner pipeline:
 
-EventBridge events are hints, not inventory truth. Periodic Config snapshots and rescans reconcile missed, duplicated, or reordered events.
+`EC2 inventory → DynamoDB outbox → S3/SQS → generator → EKS/Helm/Nmap → S3/SQS → parser → Aurora PostgreSQL`
 
-Inventory state, transactional outbox rows, and signal dedupe markers share one `pk`/`sk` DynamoDB table. Pending outbox rows have no TTL and are indexed for scheduled repair; after immutable S3 publication and both SQS sends succeed, the dispatcher marks a row delivered and starts its seven-day TTL. DynamoDB Streams provides the fast path, while the replay schedule repairs records that outlive the stream's 24-hour retention. Generator claims use a separate `dispatch_id` table. Findings are immutable S3 handoffs; the finding queue notifies external consumers and is not consumed by the scheduled in-stack processor.
+The default is a one-target evaluation. Periodic inventory, signal hints, and
+finding export remain disabled until explicitly configured.
 
-For the guarded single-account evaluation path, start with
-[`docs/getting-started.md`](../../docs/getting-started.md).
+## Before you deploy
 
-## Layout
+Use a dedicated AWS sandbox and review the plan. Even while scanning is paused,
+EKS, Aurora, a NAT gateway, an EC2 canary, logs, and retained data incur
+charges.
 
-- `state-bootstrap`: isolated S3/DynamoDB state bootstrap.
-- `application`: central application module.
-- `member-account`: independently deployable Config, collector role, and filtered event forwarding.
-- `modules`: network, storage, database, EKS, ECR, identities, functions, and signal sources.
-- `examples`: synthetic roots for created VPC, existing VPC, multi-account central, and member accounts.
-- `scripts`: validation and staged deployment helpers.
+The bootstrap checks for:
 
-All module sources and chart paths are repository-relative. Terraform never invokes Docker or builds an image. The examples expose names, accounts, networks, subnets, member maps, API client security groups, and installer principals as variables with only synthetic defaults. Override them from ignored private tfvars files before applying; do not edit tracked examples with live values.
+- Terraform 1.7.4;
+- AWS CLI v2 credentials for the exact deployment account and Region;
+- Docker with Buildx, Trivy, `jq`, Python 3, Git, and `tar`; and
+- a clean committed checkout so published image digests identify reviewed
+  source.
 
-## Staged deployment
+The deployer needs permission to create the VPC, IAM, EKS, EC2, ECR, Aurora,
+S3, SQS, DynamoDB, KMS, Secrets Manager, Lambda, EventBridge, Config,
+CloudTrail, CloudWatch, and state resources selected by the environment file.
+Use a stable IAM role or user ARN for EKS access, not an STS assumed-role ARN.
 
-Run from a central example root. `TF_BACKEND_CONFIG` points to an S3 backend file containing the bootstrap outputs and no credentials:
+## One environment file
 
-```sh
-export TF_BACKEND_CONFIG="$PWD/backend.hcl"
-export TF_ROOT="terraform/aws/examples/created-vpc"
-export PORTSCANNER_EXPECTED_AWS_ACCOUNT_ID="REPLACE_WITH_12_DIGIT_ACCOUNT_ID"
-export PORTSCANNER_EXPECTED_AWS_REGION="us-east-1"
-terraform/aws/scripts/deploy.sh "${TF_ROOT}" foundation
-```
-
-The helper accepts one or more variable files, verifies the live STS account, forces the
-expected account and Region into a temporary saved plan, and requires typing the stage
-name before applying that exact plan. It removes the potentially sensitive binary plan
-afterward. Controlled automation must explicitly set `PORTSCANNER_AUTO_APPROVE=true`;
-the script rejects targeted, destroy, replacement, and refresh-only arguments.
-
-The infrastructure progression is explicit; the pause stages reverse only dispatch:
-
-1. `foundation`: runtime, migration, Helm, and dispatch are disabled.
-2. Build and scan all seven images in an external pipeline for the selected architecture, push them to the output ECR repositories, and record immutable `sha256:` digests.
-3. `runtime`: create digest-pinned Lambda functions with mappings and schedules paused.
-4. `migrate`: invoke the migrator keyed by its image digest plus migration checksum, then install the Helm release.
-5. `canary`: enable queue/stream processing and durable outbox replay while automatic inventory schedules and EventBridge rules remain paused.
-6. `pause-canary`: stop the canary pipeline while retaining its fail-closed one-target boundary.
-7. `activate`: explicitly enable recurring schedules and filtered EventBridge rules.
-8. `pause`: retain runtime, operator, and evidence while disabling mappings, schedules,
-   and filtered EventBridge rules again.
-
-The helper rejects a pause plan if it contains migration, image, Helm, or other changes
-outside dispatch mappings and rules.
-
-When EKS or Helm refresh is unavailable, `scripts/emergency-pause.sh <central-root>`
-reads exact controls from state and disables the managed Lambda event-source mappings
-and EventBridge rules directly through AWS APIs. It does not plan, contact Kubernetes,
-or terminate scanner Jobs already running.
-
-After the foundation apply, validate the image mapping without contacting AWS or
-building anything:
+Copy the tracked template:
 
 ```sh
-terraform/aws/scripts/build-images.sh --dry-run "${TF_ROOT}" arm64
+cp terraform/aws/deployment/environment.auto.tfvars.json.example \
+  terraform/aws/deployment/environment.auto.tfvars.json
+$EDITOR terraform/aws/deployment/environment.auto.tfvars.json
 ```
 
-The dry run still requires `git`, `terraform`, the AWS CLI, Docker buildx, `jq`, Python
-3, and `tar` to be installed, and it reads the applied `repository_urls` and
-`deployment_state` outputs. It accepts only `application`, `created-vpc`,
-`existing-vpc`, and `multi-account-central`; all export both outputs. It explicitly
-rejects `member-account`. Valid foundation and later deployment states are accepted so
-the same helper publishes upgrade images. Dry run makes no AWS identity call, registry
-login, build, or push, and emits no digest input. A normal build additionally requires
-a configured AWS Region and an authenticated identity in the exact account and Region
-owning the output repositories, plus Trivy for the mandatory release-digest scan.
+The ignored JSON file is the only user-maintained deployment configuration.
+It contains no credentials. Set:
 
-Build and push from a clean, reviewed checkout. The helper combines the checked-out
-commit (or reviewed Git tag) with `arm64`/`x86_64`, so immutable ECR tags cannot be
-reused across incompatible architectures. Redirect stdout to a private, non-committed
-file; all progress is written to stderr:
+- the environment name, AWS account, and Region;
+- the stable EKS installer principal and the Terraform runner's public `/32`;
+- VPC, architecture, capacity, rate, and retention policy;
+- whether the managed canary is present; and
+- explicit integration account, CIDR, ENI class, and opt-in tag scope.
+
+AWS credentials stay in the normal CLI/provider credential chain. Database
+passwords are RDS/Secrets Manager managed. Backend and immutable image inputs
+are generated under ignored `.portscanner/` storage with mode `0600`.
+
+## Deploy and evaluate
+
+Run:
 
 ```sh
-SOURCE_REVISION="$(git rev-parse HEAD)"
-terraform/aws/scripts/build-images.sh \
-  "${TF_ROOT}" arm64 "${SOURCE_REVISION}" \
-  >"$HOME/portscanner-image-inputs.tfvars"
+./terraform/aws/scripts/bootstrap.sh
+./terraform/aws/scripts/deploy.sh evaluate
 ```
 
-The optional revision/tag must be Docker-tag safe, cannot be `latest`, and must resolve
-to the checked-out `HEAD`. `PORTSCANNER_ALLOW_DIRTY=true` is accepted only with
-`--dry-run`; deployment inputs always require a clean checkout. The helper
-authenticates once per exact ECR registry using `aws ecr get-login-password`. Before
-each build it checks the immutable commit tag: an existing valid digest is reused, while
-a successful tagged-image listing that confirms absence is built and pushed. This makes
-a partially completed seven-image publication safe to resume without overwriting
-immutable tags. Any lookup error or malformed result fails closed. The helper removes
-its temporary Docker authentication configuration and does not run Terraform init,
-plan, or apply. It scans every reused or newly pushed immutable digest for fixable
-HIGH/CRITICAL vulnerabilities and emits no Terraform input if any scan fails.
+Bootstrap:
 
-Inventory, generator, parser, processor, migrator, and scanner all use the repository
-root as their build context. Only operator uses `operator/` as its context. The helper
-uses `--pull`, the selected platform, and all seven exact Dockerfiles. It attaches
-provenance and SBOM manifests only where the target runtime accepts them, as described
-below.
+1. verifies tools, the live STS account/Region, configuration shape, and clean
+   source;
+2. creates or verifies an encrypted S3 backend and DynamoDB lock table;
+3. applies a saved, explicitly confirmed foundation plan with dispatch off;
+4. builds all seven images for one architecture, scans every immutable digest,
+   and pushes them to the environment's ECR repositories; and
+5. writes generated digest and migration-checksum inputs atomically.
 
-Review the captured file before supplying it to the `runtime` and later stages. The
-helper prints this deterministic shape only after every push and digest lookup succeeds;
-it never creates a variable file itself:
+It is resumable and refuses state, backend, account, Region, or image
+collisions.
 
-```hcl
-image_digests = {
-  inventory = "sha256:<64 lowercase hex characters>"
-  generator = "sha256:<64 lowercase hex characters>"
-  parser    = "sha256:<64 lowercase hex characters>"
-  processor = "sha256:<64 lowercase hex characters>"
-  migrator  = "sha256:<64 lowercase hex characters>"
-  operator  = "sha256:<64 lowercase hex characters>"
-  scanner   = "sha256:<64 lowercase hex characters>"
-}
+Evaluation then:
 
-migration_checksum = "<64 lowercase hex characters>"
+1. creates the digest-pinned Lambda runtime with event sources paused;
+2. runs the checksum-locked database baseline and installs the Helm operator;
+3. enables only the one-target canary path;
+4. snapshots the Terraform-owned EC2 ENI and scans only TCP 18080;
+5. verifies one complete attempt, one open exposure, and one low PostgreSQL
+   finding;
+6. replays the snapshot to prove one-event/one-attempt idempotency; and
+7. returns all dispatch and reconciliation controls to `pause-canary`.
+
+Every Terraform apply still uses a displayed saved plan and an exact
+confirmation. A single shell command does not mean hidden approval.
+
+The canary is a tiny instance/EIP in a separate, unpeered VPC. It has no SSH
+key, instance role, or general ingress/egress. TCP 18080 accepts traffic only
+from the scanner NAT EIP. `localhost`, private addresses, and documentation
+addresses are not runnable targets.
+
+To install or repair the runtime without scanning:
+
+```sh
+./terraform/aws/scripts/deploy.sh ready
 ```
 
-The migration checksum is SHA-256 over the complete, strictly named
-`<version>_<name>.<up|down>.sql` set directly in `db/migrations`, sorted by UTF-8 file
-name. Any other file, directory, or symlink is rejected. Each file name and content is
-length-prefixed with an eight-byte big-endian length before hashing, so both affect the
-result without ambiguous concatenation.
+## Add AWS inventory
 
-The EKS API is private by default and must be reachable from the machine running the
-migration/install stage, for example through an approved VPN or build runner in the VPC.
-Supply that runner or VPN security group through
-`eks_api_client_security_group_ids`; Terraform grants port 443 by security-group
-reference. A disposable evaluation may instead set
-`eks_endpoint_public_access = true` with one or more restricted canonical IPv4 prefixes
-in `eks_public_access_cidrs`; private access remains enabled and `0.0.0.0/0` is rejected.
-Supply stable IAM role/user ARNs through `eks_installer_principal_arns`; Terraform
-creates EKS access entries and cluster-scoped `AmazonEKSClusterAdminPolicy`
-associations. Bootstrap creator admin is disabled by default and does not replace them.
-The runner must have the AWS CLI because Helm refreshes credentials with
-`aws eks get-token`; no plan-cached token is used. The generator Lambda's private
-runtime security group is allowed automatically.
+After evaluation, edit the same JSON:
 
-## Image architecture
+1. add exact `authorized_account_ids` and `allowed_target_cidrs`;
+2. retain deny-before-allow CIDR policy;
+3. select supported ENI interface types;
+4. require an opt-in ENI tag, such as `application=portscanner`; and
+5. set `recurring_inventory_enabled` to `true`.
 
-The deployment deliberately uses one architecture for Lambda images, EKS nodes, the operator, and scanner. Passing `arm64` to the helper selects `linux/arm64` and requires the applied `workload_architecture.architecture` to be `arm64`; passing `x86_64` selects `linux/amd64` and requires `x86_64`. The emitted input preserves the applied architecture, AMI type, and exact node-instance list. Terraform rejects a Lambda/EKS architecture mismatch and queries EC2 instance-type metadata to reject node types that do not support the selected architecture.
+Direct EC2 snapshots are the simplest authoritative source:
 
-For every reused or newly pushed digest, the helper also inspects remote Buildx image
-metadata and requires exactly the selected Linux runtime platform before scanning or
-emitting Terraform input.
+```json
+"config_mode": "disabled",
+"snapshot_regions": ["us-east-1"]
+```
 
-Terraform only creates repositories and consumes digests. A typical external builder passes `--platform linux/arm64` (or `linux/amd64`) to BuildKit, verifies the image manifest architecture, scans the immutable artifact, and supplies the resulting digest. Lambda base images, the Go operator build, and the Debian scanner image all support explicit platform builds.
+Then review and activate:
 
-EKS defaults to Kubernetes 1.36 and also accepts 1.35. Those versions keep the
-operator's Kubernetes 1.36 client libraries within supported minor-version skew.
+```sh
+./terraform/aws/scripts/deploy.sh activate
+```
 
-The helper disables attached BuildKit provenance/SBOM manifests for the five Lambda
-images so ECR stores the single-architecture image manifest Lambda expects. It enables
-attached attestations for the operator and scanner images when BuildKit supports them.
-Generate and retain separate SBOM/provenance artifacts for Lambda images in release CI;
-do not change their deployed ECR digest into an attestation-bearing OCI index.
+New and changed targets use explicit full-TCP policy. Do not broaden account,
+CIDR, tag, rate, Pod, or Job limits without authorization and traffic review.
+Periodic snapshots are authoritative; signal events only move likely changes
+ahead of baseline coverage.
 
-## Networking and production overrides
+## Optional integrations
 
-Created networking has public NAT subnets, private Lambda/EKS subnets, isolated Aurora subnets, and S3/DynamoDB gateway endpoints. Its canonical IPv4 VPC CIDR must be `/16` through `/24`, because the module adds four subnet bits and AWS subnets cannot be narrower than `/28`. The low-volume default uses one NAT gateway, one Spot node, one Aurora instance, conservative Lambda concurrency, short data retention, and no DynamoDB PITR. Production should normally override:
+- **AWS Config:** choose `config_mode=create` or supply a reviewed existing
+  aggregator. Existing mode cannot prove source accounts, Regions, recorder
+  health, or freshness.
+- **Signal hints:** set `signal_hints_enabled=true` and choose a reviewed
+  CloudTrail mode. EventBridge/CloudTrail signals always resolve through a
+  provider reread before dispatch.
+- **Finding export:** set `finding_export_enabled=true` to add the versioned S3
+  bucket, SQS/DLQ notification, IAM, and alarms. SQS messages point to S3
+  objects; consumers must follow [the contract guide](../../contracts/README.md).
+- **Multi-account:** use `examples/multi-account-central` plus
+  `member-account`. Member roles trust exact central principals and an
+  external ID; each hot-path Region needs its own reviewed forwarding root.
+- **Existing VPC:** `examples/existing-vpc` validates subnet ownership, AZ
+  spread, DNS, egress, endpoint identity/private DNS, and endpoint security
+  groups. The canonical quickstart intentionally creates networking instead.
 
-- `nat_gateway_mode = "one_per_az"`
-- `node_capacity_type = "ON_DEMAND"` and a resilient node range
-- `database_instance_count >= 2`
-- `database_deletion_protection = true`
-- `database_skip_final_snapshot = false`
-- `dynamodb_point_in_time_recovery = true`
-- backup, log, object, and queue retention
-- reserved concurrency and schedule rates after load testing
+GCP, Azure, private-address, and IPv6 inventory are not production deployment
+options in this release.
 
-Existing mode requires both VPC DNS support and DNS hostnames, and validates VPC membership, AZ spread, public-IP settings, absence of direct internet-gateway routes on private subnets, and absence of default routes on isolated subnets. It refuses to proceed without `existing_private_subnet_egress_mode`. NAT and transit modes require a matching default route from every private subnet. Endpoint mode requires explicit endpoint IDs for Config, DynamoDB, EC2, ECR API/DKR, EKS, EKS Auth, Logs, S3, Secrets Manager, SQS, and STS. Terraform verifies endpoint VPC, availability, expected service, interface private DNS, and S3/DynamoDB route-table associations. China endpoint names are validated per service because gateway and interface services use a mix of `com.amazonaws` and `cn.com.amazonaws` prefixes. Each interface endpoint also requires an explicitly selected attached security group; Terraform adds TCP/443 ingress from the application Lambda and EKS workload security groups. Review endpoint policies separately.
+## Pause and emergency stop
 
-SQS visibility defaults to 360 seconds and must remain at least six times the queue-triggered Lambda timeout.
+Normal pause keeps infrastructure and evidence:
 
-## Multi-account controls
+```sh
+./terraform/aws/scripts/deploy.sh pause
+```
 
-The central custom bus policy uses an exact account allowlist unless an optional organization ID is supplied. No Organizations API or organization membership is required by default. Member accounts trust one exact central collector role with an external ID and grant only `ec2:Describe*`; event forwarding grants only `events:PutEvents` to one central bus ARN.
+A pause plan is accepted only when it disables managed event-source mappings
+and EventBridge rules without changing images, migrations, Helm, or other
+resources.
 
-For direct member inventory, apply the central foundation first, use its `central_collector_principal_arns` output as each member's exact trusted principals, then feed each member's `collector_role_arn` output and paired external ID back through the central account-keyed maps. When any non-local scope is authorized, provide a collector entry for every authorized scope. Use one deterministic collector role path/name and one external ID across those accounts; Terraform derives the runtime's `{account_id}` role template while IAM remains restricted to the exact resulting ARNs. The snapshot and signal Lambdas may assume only those roles.
+If Terraform or EKS refresh is unavailable:
 
-AWS Config can be created, disabled in favor of direct EC2 collection, or supplied as an existing aggregator. Snapshot schedules carry an explicit account scope. Create mode provisions its same-account source authorization and scopes the aggregator to the one provider Region where it creates a recorder; it never claims all-Region coverage from that recorder. Every member account in that same source Region must separately authorize the exact central account and aggregator Region before central apply. Other Config source Regions require direct EC2 snapshots or an externally provisioned existing aggregator. An existing aggregator is referenced by name only: Terraform cannot prove its source accounts, authorizations, recording regions, resource coverage, or freshness. Config is eventually consistent and only returns resources recorded in its configured sources, so retain periodic reconciliation and use the member collector role path where direct EC2 reads are required.
+```sh
+./terraform/aws/scripts/emergency-pause.sh terraform/aws/deployment
+```
 
-Central management API-call forwarding supports `cloudtrail_mode = "create"`,
-`"existing"`, or `"disabled"`. Create mode provisions a multi-region trail; existing
-mode references a supplied member/organization management trail; disabled mode omits
-CloudTrail API-call hints while retaining native EC2 state-change hints. An ARN-only
-reference cannot prove selectors, logging health, or multi-region setting, so verify
-those live before activation. CloudTrail EventBridge rules exactly match the inventory
-runtime's EC2 API allowlist. EventBridge is regional: the application `signal_region`
-and each member `signal_region` output identify the single hot-path Region covered by
-that module instance. Deploy uniquely named forwarding roots per additional Region and
-rely on authoritative snapshots elsewhere. All rules and runtime event mappings remain
-disabled until activation.
+Emergency pause uses exact controls from Terraform state. Neither pause method
+terminates an already-created Kubernetes Job. Inspect and cancel active
+Scanner/Job resources separately.
 
-## Cost and destruction warning
+## Retire the canary
 
-Even idle environments incur charges for NAT gateways, Aurora, EKS, worker nodes, CloudTrail delivery, logs, and retained data. Review the plan and AWS pricing before applying.
+Pause first, wait for the pipeline to drain, set
+`environment.managed_canary.enabled=false`, then run:
 
-Destruction is deliberately non-trivial: data buckets and ECR repositories do not
-force-delete by default, Aurora production safeguards are opt-in variables, and
-bootstrap state resources have `prevent_destroy`. ECR count expiration is disabled;
-optional lifecycle expiration affects only untagged images. Tagged active and rollback
-digests are release-operator-managed and must never be expired automatically. Drain
-queues, export findings, retain a final database snapshot, empty retained object
-versions, and remove bootstrap lifecycle protection only through a separately reviewed
-retirement change.
+```sh
+./terraform/aws/scripts/deploy.sh retire-canary
+```
 
-Only disposable test environments should set `force_destroy_buckets = true`; this is
-needed for unattended cleanup after Config or CloudTrail has written versioned objects.
-They may also set `force_delete_repositories = true` so an explicit Terraform destroy
-can remove the evaluation images. Production must leave both settings false.
+Retirement requires `kubectl`. It verifies all queues twice, requires every
+Scanner and scanner Job to be terminal, proves no environment field other than
+the canary switch changed, restricts the saved plan to the reviewed canary
+boundary, and only then releases the EIP. Never release an EIP while queued or
+active work can still reference it.
+
+## Destruction and retained state
+
+`destroy` is available only when the environment explicitly sets both
+`disposable=true` and `destroy_data_on_teardown=true`:
+
+```sh
+./terraform/aws/scripts/deploy.sh destroy
+```
+
+It pauses first, displays a saved destroy plan, and requires typing
+`destroy <environment-name>`. An installed deployment must also pass the same
+queue, Scanner, and Job retirement-readiness checks before planning. State
+bootstrap resources are deliberately left behind. Retained/non-disposable
+environments should use deletion protection,
+PITR, resilient nodes/database instances, one NAT per AZ, durable retention,
+and a separately reviewed retirement procedure with a final database snapshot.
+
+## Development
+
+Terraform never builds images with provisioners or uses `-target`. Validate
+the roots, modules, stage scripts, Helm chart, and generated artifacts from the
+repository root:
+
+```sh
+make terraform-script-tests
+make terraform-validate
+make kubernetes-validate
+make containers
+```
+
+No automated test scans a live address.

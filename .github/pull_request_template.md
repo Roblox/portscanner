@@ -50,7 +50,7 @@ Complete this section when adding or changing a snapshot/signal source.
 - [ ] Metadata allowlist/redaction
 - [ ] Central profile/priority/deadline policy
 - [ ] IAM/Terraform registration
-- [ ] Review checklist in `docs/adding-sources.md`
+- [ ] Source-adapter requirements in `inventory/README.md`
 
 ## Canary
 

@@ -171,7 +171,7 @@ def _validate_private_ip(value: Any) -> str:
     return str(ipaddress.IPv4Address(str(value)))
 
 
-def _tags(value: Mapping[str, Any], allowlist: frozenset[str]) -> tuple[tuple[str, str], ...]:
+def _tag_values(value: Mapping[str, Any]) -> dict[str, str]:
     raw = _get(value, "TagSet", "tagSet", "Tags", "tags", default=()) or ()
     if isinstance(raw, Mapping) and isinstance(
         _get(raw, "items", "Items"),
@@ -192,7 +192,7 @@ def _tags(value: Mapping[str, Any], allowlist: frozenset[str]) -> tuple[tuple[st
         )
     sanitized: dict[str, str] = {}
     for key, item_value in pairs:
-        if not isinstance(key, str) or key not in allowlist or not isinstance(item_value, str):
+        if not isinstance(key, str) or not isinstance(item_value, str):
             continue
         if (
             not item_value.strip()
@@ -201,7 +201,37 @@ def _tags(value: Mapping[str, Any], allowlist: frozenset[str]) -> tuple[tuple[st
         ):
             continue
         sanitized[key] = item_value
+    return sanitized
+
+
+def _tags(value: Mapping[str, Any], allowlist: frozenset[str]) -> tuple[tuple[str, str], ...]:
+    sanitized = {
+        key: item_value for key, item_value in _tag_values(value).items() if key in allowlist
+    }
     return tuple(sorted(sanitized.items()))
+
+
+def network_interface_supported(
+    value: Mapping[str, Any],
+    *,
+    allowed_interface_types: Sequence[str] = (),
+    required_tag_key: str | None = None,
+    required_tag_value: str | None = None,
+) -> bool:
+    """Apply an optional ENI-class and opt-in tag gate before normalization."""
+
+    configuration = _as_mapping(_get(value, "configuration", "Configuration", default=value))
+    interface_type = str(_get(configuration, "InterfaceType", "interfaceType", default="")).lower()
+    if allowed_interface_types and interface_type not in set(allowed_interface_types):
+        return False
+    if required_tag_key is None and required_tag_value is None:
+        return True
+    if required_tag_key is None or required_tag_value is None:
+        raise ValueError("required target tag key and value must be configured together")
+    tags = _tag_values(configuration)
+    if configuration is not value:
+        tags.update(_tag_values(value))
+    return tags.get(required_tag_key) == required_tag_value
 
 
 def _group_ids(value: Mapping[str, Any]) -> tuple[str, ...]:
@@ -331,6 +361,7 @@ class NormalizedTarget:
     association_id: str | None = None
     tags: tuple[tuple[str, str], ...] = ()
     candidate_ports: CandidatePorts = field(default_factory=CandidatePorts.full)
+    managed_canary: bool = False
     source_event_name: str | None = None
     source_event_id: str | None = None
     source_request_id: str | None = None
@@ -350,6 +381,8 @@ class NormalizedTarget:
             raise ValueError("security_group_ids must be sorted and unique")
         if tuple(sorted(self.tags)) != self.tags:
             raise ValueError("tags must be sorted")
+        if not isinstance(self.managed_canary, bool):
+            raise ValueError("managed_canary must be boolean")
         if not re.fullmatch(r"[0-9a-f]{64}", self.policy_fingerprint):
             raise ValueError("invalid policy fingerprint")
         if self.observed_at is not None:
@@ -496,6 +529,7 @@ class NormalizedTarget:
             "allocation_id": self.allocation_id,
             "association_id": self.association_id,
             "tags": dict(self.tags),
+            "managed_canary": self.managed_canary,
             "observed_at": (
                 self.observed_at.isoformat().replace("+00:00", "Z")
                 if self.observed_at is not None
@@ -553,6 +587,7 @@ class NormalizedTarget:
             allocation_id=str(value["allocation_id"]) if value.get("allocation_id") else None,
             association_id=str(value["association_id"]) if value.get("association_id") else None,
             tags=tuple(sorted((str(key), str(item)) for key, item in tags.items())),
+            managed_canary=bool(value.get("managed_canary", False)),
             observed_at=observed_at,
             eni_observed_at=eni_observed_at,
             security_group_observed_at=group_observations,
@@ -570,8 +605,18 @@ def normalize_network_interface(
     observed_at: datetime | None = None,
     eni_observed_at: datetime | None = None,
     security_group_observed_at: tuple[tuple[str, datetime], ...] = (),
+    allowed_interface_types: Sequence[str] = (),
+    required_tag_key: str | None = None,
+    required_tag_value: str | None = None,
 ) -> tuple[NormalizedTarget, ...]:
     configuration = _as_mapping(_get(value, "configuration", "Configuration", default=value))
+    if not network_interface_supported(
+        value,
+        allowed_interface_types=allowed_interface_types,
+        required_tag_key=required_tag_key,
+        required_tag_value=required_tag_value,
+    ):
+        return ()
     eni_id = str(
         _get(
             configuration,
@@ -592,6 +637,15 @@ def normalize_network_interface(
     attachment_id = _get(attachment, "AttachmentId", "attachmentId")
     lifecycle = _lifecycle(configuration, instance_state=instance_state)
     tags = _tags(configuration, frozenset(allowed_tag_keys))
+    if configuration is not value:
+        tags = tuple(
+            sorted(
+                {
+                    **dict(tags),
+                    **dict(_tags(value, frozenset(allowed_tag_keys))),
+                }.items()
+            )
+        )
     return tuple(
         NormalizedTarget(
             account_id=account_id,

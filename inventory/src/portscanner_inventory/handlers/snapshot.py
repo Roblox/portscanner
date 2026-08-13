@@ -6,6 +6,7 @@ import json
 import logging
 import os
 from collections.abc import Callable, Mapping
+from dataclasses import replace
 from datetime import datetime
 from ipaddress import AddressValueError, IPv4Address
 from typing import Any
@@ -15,13 +16,14 @@ from portscanner_inventory.aws.ec2_snapshot import Ec2SnapshotBackend
 from portscanner_inventory.aws.ownership import OwnershipValidator
 from portscanner_inventory.aws.session import AwsClientFactory
 from portscanner_inventory.base import (
+    CandidatePorts,
     OwnershipVerdict,
     SnapshotScope,
     partial_batch,
     structured_log,
     utc_now,
 )
-from portscanner_inventory.config import Settings
+from portscanner_inventory.config import ManagedCanary, Settings
 from portscanner_inventory.events import snapshot_source
 from portscanner_inventory.state import DynamoStateStore, ReconcileAction
 
@@ -36,6 +38,8 @@ def reconcile_snapshot(
     now: datetime,
     target_public_ipv4: str | None = None,
     require_exact_target: bool = False,
+    target_allowed: Callable[[str], bool] | None = None,
+    managed_canary: ManagedCanary | None = None,
 ) -> dict[str, Any]:
     """Apply observed targets, then remove only directly revalidated absences."""
 
@@ -49,10 +53,23 @@ def reconcile_snapshot(
     selected = tuple(
         target
         for target in batch.targets
-        if target_public_ipv4 is None or target.public_ip == target_public_ipv4
+        if (target_public_ipv4 is None or target.public_ip == target_public_ipv4)
+        and (managed_canary is None or managed_canary.matches(target))
+        and (target_allowed is None or target_allowed(target.public_ip))
     )
     if require_exact_target and len(selected) != 1:
-        raise ValueError("canary snapshot must resolve target_public_ipv4 to exactly one target")
+        raise ValueError("canary snapshot must resolve the configured target to exactly one target")
+    if managed_canary is not None:
+        selected = tuple(
+            replace(
+                target,
+                candidate_ports=CandidatePorts(
+                    ranges=((managed_canary.tcp_port, managed_canary.tcp_port),)
+                ),
+                managed_canary=True,
+            )
+            for target in selected
+        )
 
     observed_ids: set[str] = set()
     revalidated = 0
@@ -97,6 +114,8 @@ def reconcile_snapshot(
 
     if batch.complete and target_public_ipv4 is None:
         for current in state.list_current(batch.scope):
+            if target_allowed is not None and not target_allowed(current.target.public_ip):
+                continue
             if current.target_id in observed_ids:
                 continue
             revalidated += 1
@@ -157,14 +176,12 @@ def _requested_account_id(request: Mapping[str, Any], settings: Settings) -> str
 def _requested_region(
     request: Mapping[str, Any],
     settings: Settings,
-    *,
-    field: str = "region",
 ) -> str | None:
-    value = request.get(field)
+    value = request.get("region")
     if value is None:
         return None
     if not isinstance(value, str) or value not in settings.regions:
-        raise ValueError(f"{field} is outside the configured snapshot Region scope")
+        raise ValueError("region is outside the configured snapshot Region scope")
     return value
 
 
@@ -190,44 +207,67 @@ class _Runtime:
             self.state,
             self.factory,
             allowed_tag_keys=settings.allowed_tag_keys,
+            allowed_interface_types=settings.allowed_eni_interface_types,
+            required_tag_key=settings.required_target_tag_key,
+            required_tag_value=settings.required_target_tag_value,
         )
 
     def process(self, request: Mapping[str, Any]) -> list[dict[str, Any]]:
         now = utc_now()
-        target_public_ipv4 = _requested_target_public_ipv4(request)
-        account_id = _requested_account_id(request, self.settings)
-        requested_region = _requested_region(request, self.settings)
-        if self.settings.canary_mode and (
-            target_public_ipv4 is None or "account_id" not in request or requested_region is None
-        ):
-            raise ValueError("canary snapshot requires account_id, region, and target_public_ipv4")
+        operation = request.get("operation")
+        managed_canary: ManagedCanary | None = None
+        target_public_ipv4: str | None
+        account_id: str
+        requested_region: str | None
+        if operation == "managed-canary":
+            if not self.settings.canary_mode or self.settings.managed_canary is None:
+                raise ValueError("managed-canary operation is not enabled")
+            forbidden = {"account_id", "region", "target_public_ipv4"}
+            if forbidden.intersection(request):
+                raise ValueError("managed-canary operation does not accept target overrides")
+            managed_canary = self.settings.managed_canary
+            target_public_ipv4 = managed_canary.public_ip
+            account_id = managed_canary.account_id
+            requested_region = managed_canary.region
+        else:
+            if operation is not None:
+                raise ValueError("unsupported snapshot operation")
+            if self.settings.canary_mode and self.settings.managed_canary is not None:
+                raise ValueError("managed canary snapshot requires operation=managed-canary")
+            target_public_ipv4 = _requested_target_public_ipv4(request)
+            account_id = _requested_account_id(request, self.settings)
+            requested_region = _requested_region(request, self.settings)
+            if self.settings.canary_mode and (
+                target_public_ipv4 is None
+                or "account_id" not in request
+                or requested_region is None
+            ):
+                raise ValueError(
+                    "canary snapshot requires account_id, region, and target_public_ipv4"
+                )
+        if not self.settings.account_authorized(account_id):
+            raise ValueError("account_id is outside the configured authorized account scope")
+        if target_public_ipv4 is not None and not self.settings.target_allowed(target_public_ipv4):
+            raise ValueError("target_public_ipv4 is outside the configured CIDR scope")
         backend: ConfigSnapshotBackend | Ec2SnapshotBackend
         if self.settings.snapshot_backend == "config":
             client_region = os.environ.get("AWS_REGION") or "us-east-1"
-            legacy_target_region = _requested_region(
-                request,
-                self.settings,
-                field="target_region",
-            )
-            if (
-                requested_region is not None
-                and legacy_target_region is not None
-                and requested_region != legacy_target_region
-            ):
-                raise ValueError("region and target_region must identify the same target Region")
-            target_region = requested_region or legacy_target_region
             client = self.session.client("config", region_name=client_region)
             scope = SnapshotScope(
                 source="aws-config",
                 name=self.settings.config_aggregator_name,
                 account_id=account_id,
-                region=target_region,
+                region=requested_region,
             )
             backend = ConfigSnapshotBackend(
                 client,
                 aggregator_name=self.settings.config_aggregator_name or "",
                 scope=scope,
                 allowed_tag_keys=self.settings.allowed_tag_keys,
+                allowed_interface_types=self.settings.allowed_eni_interface_types,
+                required_tag_key=self.settings.required_target_tag_key,
+                required_tag_value=self.settings.required_target_tag_value,
+                max_pages=self.settings.snapshot_max_pages,
             )
             return [
                 reconcile_snapshot(
@@ -237,6 +277,8 @@ class _Runtime:
                     now=now,
                     target_public_ipv4=target_public_ipv4,
                     require_exact_target=self.settings.canary_mode,
+                    target_allowed=self.settings.target_allowed,
+                    managed_canary=managed_canary,
                 )
             ]
 
@@ -249,6 +291,10 @@ class _Runtime:
                 account_id=account_id,
                 region=region,
                 allowed_tag_keys=self.settings.allowed_tag_keys,
+                allowed_interface_types=self.settings.allowed_eni_interface_types,
+                required_tag_key=self.settings.required_target_tag_key,
+                required_tag_value=self.settings.required_target_tag_value,
+                max_pages=self.settings.snapshot_max_pages,
             )
             summaries.append(
                 reconcile_snapshot(
@@ -258,6 +304,8 @@ class _Runtime:
                     now=now,
                     target_public_ipv4=target_public_ipv4,
                     require_exact_target=self.settings.canary_mode,
+                    target_allowed=self.settings.target_allowed,
+                    managed_canary=managed_canary,
                 )
             )
         return summaries

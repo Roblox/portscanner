@@ -192,6 +192,9 @@ def _ingest(
     repository: Repository,
     envelope: ScanEnvelope,
     observations: list[Observation],
+    *,
+    finding_bucket: str | None = FINDING_BUCKET,
+    queue_finding_handoffs: bool = True,
 ) -> Any:
     target_event = repository.connection.execute(
         """
@@ -213,8 +216,9 @@ def _ingest(
         envelope_sha256=hashlib.sha256(f"envelope:{envelope.attempt_id}".encode()).hexdigest(),
         raw_result_version=None,
         enrichment_result_version=None,
-        finding_bucket=FINDING_BUCKET,
+        finding_bucket=finding_bucket,
         xml_completion_validated=envelope.outcome == "complete",
+        queue_finding_handoffs=queue_finding_handoffs,
     )
 
 
@@ -502,25 +506,6 @@ def test_address_binding_change_closes_old_address_and_publishes_history(
         )
         == 2
     )
-
-    migrator = Migrator(
-        connection,
-        discover_migrations(REPOSITORY_ROOT / "db" / "migrations"),
-    )
-    assert migrator.down(target="000004", steps=None) == ["000005"]
-    assert (
-        _scalar(
-            connection,
-            """
-        SELECT closure_reason
-        FROM act.exposure_state
-        WHERE target_id = %s AND protocol = 'tcp' AND port = 22
-        """,
-            (TARGET_ID,),
-        )
-        == "address_binding_changed"
-    )
-    assert migrator.up() == ["000005"]
 
     _ingest(
         repository,
@@ -871,3 +856,60 @@ def test_handoff_retry_and_processor_current_only_export(
     serialized = str(snapshots)
     assert "raw_result" not in serialized
     assert "credentials" not in serialized
+
+
+def test_database_findings_commit_without_export_handoffs(
+    repository: Repository,
+    connection: Any,
+) -> None:
+    repository.apply_target_event(
+        _target_event("target-upsert-database-only", scan_reason="new_target"),
+        finding_bucket=None,
+        queue_finding_handoffs=False,
+    )
+    result = _ingest(
+        repository,
+        _envelope("attempt-database-only", coverage=_coverage("18080")),
+        [_observation(18080)],
+        finding_bucket=None,
+        queue_finding_handoffs=False,
+    )
+
+    assert result.state_eligible
+    assert result.handoff_keys == ()
+    assert (
+        _scalar(
+            connection,
+            """
+            SELECT count(*)
+            FROM act.findings
+            WHERE target_id = %s
+              AND protocol = 'tcp'
+              AND port = 18080
+              AND status = 'open'
+              AND severity = 'low'
+            """,
+            (TARGET_ID,),
+        )
+        == 1
+    )
+    assert _scalar(connection, "SELECT count(*) FROM act.finding_handoffs") == 0
+
+    repository.apply_target_event(
+        _target_event(
+            "target-remove-database-only",
+            generation=2,
+            event_type="remove",
+            minute=2,
+        ),
+        finding_bucket=None,
+        queue_finding_handoffs=False,
+    )
+    assert (
+        _scalar(
+            connection,
+            "SELECT count(*) FROM act.findings WHERE status = 'resolved'",
+        )
+        == 1
+    )
+    assert _scalar(connection, "SELECT count(*) FROM act.finding_handoffs") == 0

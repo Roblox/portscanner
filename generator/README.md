@@ -1,49 +1,48 @@
-# portscanner-generator
+<!--
+SPDX-FileCopyrightText: 2026 Portscanner contributors
+SPDX-License-Identifier: MIT
+-->
 
-`portscanner-generator` is a Python 3.12 AWS Lambda package that turns one
-immutable `TargetEvent` object into at most one Kubernetes `Scanner` resource.
-It validates the SQS/S3 source, checks event freshness, revalidates inventory
-ownership immediately before dispatch, cancels older generations, and uses a
-DynamoDB claim state machine for retry-safe idempotency.
+# Portscanner generator
 
-## Required environment
+The generator is a Python 3.12 AWS Lambda that turns one immutable
+`TargetEvent` into at most one namespaced Kubernetes `Scanner` resource. It is
+an internal deployment component; users configure it through
+[`terraform/aws`](../terraform/aws/README.md), not by invoking it directly.
 
-- `TARGET_EVENT_BUCKET` (or `S3_BUCKET`)
-- `TARGET_EVENT_PREFIX` (or `S3_PREFIX`)
-- `IDEMPOTENCY_TABLE` (or `DYNAMODB_TABLE` / `DISPATCH_TABLE_NAME`)
-- `INVENTORY_TABLE` (or `TARGET_TABLE_NAME`) when constructing the bundled
-  inventory ownership validator
-- `EKS_CLUSTER_NAME`
-- `K8S_NAMESPACE`
-- `AWS_REGION` (or `AWS_DEFAULT_REGION`)
+## Dispatch boundary
 
-`K8S_API_GROUP`, when set, must be `scanning.portscanner.io`.
-`K8S_API_VERSION`, when set, must be `v1alpha1`.
+For each SQS/S3 event pointer, the generator:
 
-The DynamoDB table partition key defaults to `dispatch_id` and can be changed with
-`DYNAMODB_PARTITION_KEY`. Enable DynamoDB TTL on the `expires_at` attribute.
+1. validates the configured bucket/prefix, object integrity, contract, and
+   freshness;
+2. rejects targets outside the authorized account and deny-before-allow CIDR
+   policy;
+3. acquires a DynamoDB idempotency claim and compares the current inventory
+   generation;
+4. rereads provider ownership and scan-relevant policy immediately before
+   dispatch;
+5. cancels superseded Scanner resources; and
+6. creates one deterministic Scanner resource only while the target is
+   `ACTIVE` and the dispatch deadline is still valid.
 
-The runtime prefers the shared `portscanner_contracts.parse_target_event()`
-entrypoint so the contract package owns the complete event union, including
-removals. It falls back to `TargetEvent.model_validate()` (or `from_dict()`) for
-older released packages and isolated tests. When a contract does not carry a
-separate trace identifier, its opaque event ID is propagated as the trace ID.
-The inventory boundary supports both `validate_event(event)` and
-`revalidate(target, generation)`.
+`STALE`, `MOVED`, `INACTIVE`, ambiguous, or out-of-scope targets do not scan.
+Retries may repeat reads but cannot create a second effective dispatch.
 
-## Tests
+The runtime receives exact bucket, table, EKS, namespace, account, Region, and
+CIDR settings from Terraform. It uses the standard AWS credential chain and
+EKS authentication; no kubeconfig or static cloud credential is embedded in
+the image.
 
-From the repository root, install the locked workspace and run the package tests. They
-use only in-memory fakes:
+## Development
+
+From the repository root:
 
 ```sh
-uv sync --frozen --all-packages --group dev
 uv run --package portscanner-generator pytest generator/tests
+docker build --file generator/Dockerfile --tag portscanner-generator:local .
 ```
 
-Build the Lambda image from the repository root so the shared contract and
-inventory packages are included:
-
-```sh
-docker build -f generator/Dockerfile .
-```
+The repository root is the required image context because the generator
+packages the shared contracts and inventory ownership adapter. Tests use
+in-memory fakes and never contact a live cluster or target.

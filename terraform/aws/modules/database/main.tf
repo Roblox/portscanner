@@ -149,14 +149,19 @@ resource "aws_security_group" "database" {
 }
 
 locals {
-  database_client_security_group_ids = setunion(
-    toset([var.application_security_group_id]),
-    var.additional_client_security_group_ids
+  database_client_security_groups = merge(
+    {
+      application = var.application_security_group_id
+    },
+    {
+      for security_group_id in var.additional_client_security_group_ids :
+      "additional-${security_group_id}" => security_group_id
+    }
   )
 }
 
 resource "aws_vpc_security_group_ingress_rule" "database" {
-  for_each = local.database_client_security_group_ids
+  for_each = local.database_client_security_groups
 
   security_group_id            = aws_security_group.database.id
   referenced_security_group_id = each.value

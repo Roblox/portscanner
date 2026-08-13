@@ -1,10 +1,9 @@
-# Copyright 2026 Roblox Corporation
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Portscanner contributors
+# SPDX-License-Identifier: MIT
 
 SHELL := /usr/bin/env bash
 
 GO ?= go
-KUBECTL ?= kubectl
 HELM ?= helm
 IMG ?= portscanner-operator:latest
 LOCALBIN ?= $(CURDIR)/bin
@@ -48,11 +47,9 @@ generate: $(CONTROLLER_GEN)
 .PHONY: manifests
 manifests: $(CONTROLLER_GEN)
 	$(CONTROLLER_GEN) \
-		rbac:roleName=portscanner-operator,headerFile=hack/boilerplate.yaml.txt \
 		crd:headerFile=hack/boilerplate.yaml.txt \
 		paths="./..." \
-		output:crd:artifacts:config=config/crd/bases \
-		output:rbac:artifacts:config=config/rbac
+		output:crd:artifacts:config=config/crd/bases
 	$(CONTROLLER_GEN) \
 		crd:headerFile=hack/boilerplate.yaml.txt \
 		paths="./..." \
@@ -60,31 +57,14 @@ manifests: $(CONTROLLER_GEN)
 
 .PHONY: verify-manifests
 verify-manifests:
-	$(KUBECTL) kustomize config/default >/dev/null
 	$(HELM) lint chart/portscanner
 	$(HELM) template portscanner chart/portscanner \
-		--namespace portscanner-system \
+		--namespace portscanner-system --include-crds \
 		--kube-version 1.36.0 >/dev/null
 
 .PHONY: docker-build
 docker-build:
 	docker build --tag $(IMG) .
-
-.PHONY: install
-install:
-	$(KUBECTL) apply -f config/crd/bases/scanning.portscanner.io_scanners.yaml
-
-.PHONY: uninstall
-uninstall:
-	$(KUBECTL) delete -f config/crd/bases/scanning.portscanner.io_scanners.yaml --ignore-not-found
-
-.PHONY: deploy
-deploy:
-	$(KUBECTL) apply -k config/default
-
-.PHONY: undeploy
-undeploy:
-	$(KUBECTL) delete -k config/default --ignore-not-found
 
 $(CONTROLLER_GEN):
 	mkdir -p $(LOCALBIN)

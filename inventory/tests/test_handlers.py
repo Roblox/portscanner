@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from ipaddress import IPv4Address, IPv4Network
 from typing import Any
 from urllib.parse import unquote_plus
 
@@ -11,7 +13,7 @@ from portscanner_contracts import ScanReason, TargetRemoval, parse_target_event
 
 from portscanner_inventory.aws.signals import parse_signal
 from portscanner_inventory.base import CandidatePorts, Resolution, SnapshotScope
-from portscanner_inventory.config import Settings
+from portscanner_inventory.config import ManagedCanary, Settings
 from portscanner_inventory.events import (
     build_removal_event,
     build_target_event,
@@ -95,6 +97,27 @@ def test_signal_processing_deduplicates_and_reconciles_resolved_target() -> None
 
     assert first == {"status": "processed", "events": 1, "targets": 1}
     assert duplicate == {"status": "duplicate", "events": 0}
+
+
+def test_signal_rejects_unauthorized_account_before_api_or_state_side_effects() -> None:
+    class State:
+        def claim_signal(self, *_args, **_kwargs):
+            raise AssertionError("unauthorized signal mutated state")
+
+    class Resolver:
+        def resolve(self, _hint):
+            raise AssertionError("unauthorized signal reached EC2")
+
+    with pytest.raises(ValueError, match="authorized account scope"):
+        process_signal(
+            _signal_event(),
+            State(),
+            Resolver(),
+            object(),
+            now=NOW,
+            dedupe_seconds=60,
+            authorized_account_ids=("222222222222",),
+        )
 
 
 def test_signal_lambda_returns_partial_sqs_batch_failures() -> None:
@@ -218,6 +241,37 @@ def _removal_event() -> TargetRemoval:
         source=snapshot_source(scope, NOW),
         collected_at=NOW,
     )
+
+
+def test_only_trusted_managed_new_target_uses_targeted_tcp() -> None:
+    scope = SnapshotScope(source="ec2", account_id=ACCOUNT_ID, region=REGION)
+    managed = replace(
+        normalized_target(tags=[{"Key": "service", "Value": "managed-canary"}]),
+        candidate_ports=CandidatePorts(ranges=((18080, 18080),)),
+        managed_canary=True,
+    )
+    managed_event = build_target_event(
+        managed,
+        1,
+        source=snapshot_source(scope, NOW),
+        collected_at=NOW,
+    )
+    ordinary_event = build_target_event(
+        replace(managed, managed_canary=False),
+        1,
+        source=snapshot_source(scope, NOW),
+        collected_at=NOW,
+    )
+
+    assert managed_event.scan.profile.value == "targeted-tcp"
+    assert [(item.start, item.end) for item in managed_event.scan.tcp_port_ranges] == [
+        (18080, 18080)
+    ]
+    assert managed_event.aws_context.candidate_tcp_port_ranges == (
+        managed_event.scan.tcp_port_ranges
+    )
+    assert ordinary_event.scan.profile.value == "fast-full-tcp"
+    assert [(item.start, item.end) for item in ordinary_event.scan.tcp_port_ranges] == [(1, 65535)]
 
 
 def _dispatch(record: dict[str, Any], s3: S3, sqs: SQS) -> bool:
@@ -344,43 +398,6 @@ def test_outbox_replay_dispatches_pending_row_and_marks_delivery() -> None:
     }
     assert update["ExpressionAttributeValues"][":delivered"] == {"S": "outbox-delivered"}
     assert int(update["ExpressionAttributeValues"][":expires"]["N"]) > int(NOW.timestamp())
-
-
-def test_outbox_legacy_pending_row_uses_safe_retention_before_sending() -> None:
-    event = _work_event(ScanReason.NEW_TARGET)
-    record = _outbox_record(event)
-    image = record["dynamodb"]["NewImage"]
-    del image["delivery_ttl_seconds"]
-    image["expires_at"] = {"N": str(int(NOW.timestamp()) + 60)}
-
-    class Dynamo:
-        def __init__(self) -> None:
-            self.updates: list[dict[str, Any]] = []
-
-        def update_item(self, **request: Any) -> dict[str, Any]:
-            self.updates.append(request)
-            return {}
-
-    dynamodb = Dynamo()
-    s3 = S3()
-    sqs = SQS()
-    assert dispatch_record(
-        record,
-        s3,
-        sqs,
-        bucket="events",
-        priority_queue_url=PRIORITY_QUEUE_URL,
-        coverage_queue_url=COVERAGE_QUEUE_URL,
-        target_event_queue_url=TARGET_EVENT_QUEUE_URL,
-        dynamodb_client=dynamodb,
-        table_name="inventory",
-        delivered_at=NOW,
-    )
-
-    assert len(sqs.requests) == 2
-    assert dynamodb.updates[0]["ExpressionAttributeValues"][":expires"] == {
-        "N": str(int(NOW.timestamp()) + 604_800)
-    }
 
 
 def test_outbox_invalid_tracking_fails_before_s3_or_sqs_side_effects() -> None:
@@ -526,6 +543,27 @@ def test_snapshot_settings_parse_and_validate_runtime_boundaries() -> None:
         regions=("us-east-1",),
     )
     member_only.validate_snapshot()
+
+    managed_outside_normal_scope = Settings(
+        state_table="inventory",
+        event_bucket="events",
+        snapshot_backend="ec2",
+        account_id="123456789012",
+        authorized_account_ids=("123456789012",),
+        regions=("us-east-1",),
+        managed_canary=ManagedCanary(
+            account_id="123456789012",
+            region="us-east-1",
+            network_interface_id="eni-aaaaaaaa",
+            private_ip="10.0.0.10",
+            public_ip=str(IPv4Address(0x08080808)),
+            tag_key="service",
+            tag_value="managed-canary",
+            tcp_port=18080,
+        ),
+        allowed_target_cidrs=(IPv4Network("198.51.100.1/32"),),
+    )
+    managed_outside_normal_scope.validate_snapshot()
 
     with pytest.raises(ValueError, match="must be true or false"):
         Settings.from_env(

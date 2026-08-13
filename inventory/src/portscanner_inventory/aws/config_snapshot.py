@@ -27,6 +27,7 @@ SELECT
   resourceId,
   resourceType,
   configurationItemCaptureTime,
+  tags,
   configuration
 WHERE
   resourceType = 'AWS::EC2::NetworkInterface'
@@ -39,6 +40,7 @@ SELECT
   resourceId,
   resourceType,
   configurationItemCaptureTime,
+  tags,
   configuration
 WHERE
   resourceType = 'AWS::EC2::SecurityGroup'
@@ -93,21 +95,32 @@ class ConfigSnapshotBackend:
         aggregator_name: str,
         scope: SnapshotScope | None = None,
         allowed_tag_keys: Sequence[str] = (),
+        allowed_interface_types: Sequence[str] = (),
+        required_tag_key: str | None = None,
+        required_tag_value: str | None = None,
         page_size: int = 100,
+        max_pages: int = 1000,
     ) -> None:
         self._client = client
         self._aggregator_name = aggregator_name
         self._scope = scope or SnapshotScope(source="aws-config", name=aggregator_name)
         self._allowed_tag_keys = tuple(allowed_tag_keys)
+        self._allowed_interface_types = tuple(allowed_interface_types)
+        self._required_tag_key = required_tag_key
+        self._required_tag_value = required_tag_value
         self._page_size = page_size
+        self._max_pages = max_pages
         if self._scope.source != "aws-config":
             raise ValueError("Config backend requires an aws-config scope")
         if not 1 <= page_size <= 100:
             raise ValueError("Config page_size must be within 1..100")
+        if not 1 <= max_pages <= 10_000:
+            raise ValueError("Config max_pages must be within 1..10000")
 
     def fetch_records(self, expression: str) -> _Fetch:
         records: list[Mapping[str, Any]] = []
         token: str | None = None
+        seen_tokens: set[str] = set()
         pages = 0
         malformed = 0
         while True:
@@ -141,7 +154,23 @@ class ConfigSnapshotBackend:
             next_token = response.get("NextToken")
             if not next_token:
                 return _Fetch(tuple(records), pages, malformed)
-            token = str(next_token)
+            next_value = str(next_token)
+            if next_value in seen_tokens:
+                return _Fetch(
+                    tuple(records),
+                    pages,
+                    malformed,
+                    "pagination-token-repeated",
+                )
+            if pages >= self._max_pages:
+                return _Fetch(
+                    tuple(records),
+                    pages,
+                    malformed,
+                    "pagination-page-limit",
+                )
+            seen_tokens.add(next_value)
+            token = next_value
 
     def collect(self) -> SnapshotBatch:
         group_fetch = self.fetch_records(SECURITY_GROUP_QUERY)
@@ -224,6 +253,9 @@ class ConfigSnapshotBackend:
                     observed_at=composite_observed_at,
                     eni_observed_at=eni_captured_at,
                     security_group_observed_at=group_captures,
+                    allowed_interface_types=self._allowed_interface_types,
+                    required_tag_key=self._required_tag_key,
+                    required_tag_value=self._required_tag_value,
                 ):
                     existing = normalized.get(target.target_id)
                     if existing is None or (

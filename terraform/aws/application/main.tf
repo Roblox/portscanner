@@ -15,7 +15,11 @@ locals {
   snapshot_regions = length(var.snapshot_regions) > 0 ? var.snapshot_regions : [
     data.aws_region.current.region
   ]
-  operator_chart_path = abspath("${path.module}/../../../operator/chart/portscanner")
+  periodic_snapshots_enabled       = var.periodic_snapshots_enabled
+  periodic_coverage_enabled        = var.periodic_coverage_enabled
+  signal_hints_enabled             = var.signal_hints_enabled
+  processor_reconciliation_enabled = var.processor_reconciliation_enabled
+  operator_chart_path              = abspath("${path.module}/../../../operator/chart/portscanner")
 
   cloudtrail_arn = (
     var.cloudtrail_mode == "create" ?
@@ -43,6 +47,52 @@ locals {
   bus_authorized_account_ids = setunion(
     var.allowed_member_account_ids,
     toset([data.aws_caller_identity.current.account_id])
+  )
+  managed_canary_scanner_source_cidrs = concat(
+    [for address in module.network.created_nat_public_ips : "${address}/32"],
+    [
+      for address in sort(tolist(var.managed_canary_scanner_source_ipv4s)) :
+      "${address}/32"
+    ]
+  )
+  managed_canary = var.managed_canary_enabled ? {
+    account_id           = data.aws_caller_identity.current.account_id
+    region               = data.aws_region.current.region
+    network_interface_id = module.managed_canary[0].network_interface_id
+    private_ip           = module.managed_canary[0].private_ip
+    public_ip            = module.managed_canary[0].public_ip
+    tag_key              = module.managed_canary[0].inventory_tag_key
+    tag_value            = module.managed_canary[0].inventory_tag_value
+    tcp_port             = module.managed_canary[0].listener_port
+  } : null
+  effective_authorized_account_ids = (
+    var.managed_canary_enabled && var.canary_mode ?
+    toset([data.aws_caller_identity.current.account_id]) :
+    var.authorized_account_ids
+  )
+  effective_allowed_target_cidrs = (
+    var.managed_canary_enabled && var.canary_mode ?
+    toset([module.managed_canary[0].public_cidr]) :
+    var.allowed_target_cidrs
+  )
+  effective_allowed_tag_keys = setunion(
+    var.allowed_tag_keys,
+    var.managed_canary_enabled ? toset(["service"]) : toset([])
+  )
+  effective_allowed_eni_interface_types = (
+    var.managed_canary_enabled && var.canary_mode ?
+    toset(["interface"]) :
+    var.inventory_allowed_eni_interface_types
+  )
+  effective_required_target_tag_key = (
+    var.managed_canary_enabled && var.canary_mode ?
+    module.managed_canary[0].inventory_tag_key :
+    var.inventory_required_target_tag_key
+  )
+  effective_required_target_tag_value = (
+    var.managed_canary_enabled && var.canary_mode ?
+    module.managed_canary[0].inventory_tag_value :
+    var.inventory_required_target_tag_value
   )
 }
 
@@ -101,14 +151,25 @@ resource "terraform_data" "deployment_stage_validation" {
         var.deploy_runtime &&
         var.run_migration &&
         var.install_operator &&
-        length(var.authorized_account_ids) > 0
+        length(local.effective_authorized_account_ids) > 0
       )
       error_message = "Activation requires runtime, migration, operator installation, and explicit authorized_account_ids."
     }
 
     precondition {
-      condition     = !var.enable_automatic_inventory || var.enable_event_dispatch
-      error_message = "Automatic inventory requires the queue and stream dispatch pipeline."
+      condition = !(
+        local.periodic_snapshots_enabled ||
+        local.periodic_coverage_enabled ||
+        local.signal_hints_enabled
+      ) || var.enable_event_dispatch
+      error_message = "Periodic snapshots, coverage, and signal hints require the queue and stream dispatch pipeline."
+    }
+
+    precondition {
+      condition = !local.processor_reconciliation_enabled || (
+        var.deploy_runtime && var.run_migration
+      )
+      error_message = "Processor reconciliation requires deployed, migrated runtime."
     }
 
     precondition {
@@ -116,12 +177,43 @@ resource "terraform_data" "deployment_stage_validation" {
         var.deploy_runtime &&
         var.run_migration &&
         var.install_operator &&
-        !var.enable_automatic_inventory &&
-        length(var.authorized_account_ids) > 0 &&
-        length(var.allowed_target_cidrs) == 1 &&
-        can(regex("/32$", try(one(var.allowed_target_cidrs), "")))
+        !local.periodic_snapshots_enabled &&
+        !local.periodic_coverage_enabled &&
+        !local.signal_hints_enabled &&
+        length(local.effective_authorized_account_ids) > 0 &&
+        length(local.effective_allowed_target_cidrs) == 1 &&
+        can(regex("/32$", try(one(local.effective_allowed_target_cidrs), "")))
       )
       error_message = "canary_mode requires installed migrated runtime, explicit account scope, one exact /32 target allowlist, and automatic inventory disabled."
+    }
+
+    precondition {
+      condition = !var.managed_canary_enabled || (
+        length(local.managed_canary_scanner_source_cidrs) > 0
+      )
+      error_message = "managed_canary_enabled requires at least one scanner NAT EIP."
+    }
+
+    precondition {
+      condition = !(var.managed_canary_enabled && var.canary_mode) ? true : alltrue([
+        for cidr in var.denied_target_cidrs :
+        cidrhost(
+          "${module.managed_canary[0].public_ip}/${split("/", cidr)[1]}",
+          0
+        ) != split("/", cidr)[0]
+      ])
+      error_message = "The managed canary EIP must not be included by denied_target_cidrs."
+    }
+
+    precondition {
+      condition = (
+        var.inventory_required_target_tag_key == null &&
+        var.inventory_required_target_tag_value == null
+        ) || (
+        try(length(var.inventory_required_target_tag_key) > 0, false) &&
+        try(length(var.inventory_required_target_tag_value) > 0, false)
+      )
+      error_message = "inventory_required_target_tag_key and inventory_required_target_tag_value must be configured together."
     }
   }
 }
@@ -139,9 +231,11 @@ resource "terraform_data" "authorized_scope_validation" {
     }
 
     precondition {
-      condition = !var.enable_automatic_inventory || var.allowed_organization_id != null || alltrue([
-        for account_id in var.authorized_account_ids :
-        contains(local.bus_authorized_account_ids, account_id)
+      condition = !(
+        local.periodic_snapshots_enabled || local.signal_hints_enabled
+        ) || var.allowed_organization_id != null || alltrue([
+          for account_id in local.effective_authorized_account_ids :
+          contains(local.bus_authorized_account_ids, account_id)
       ])
       error_message = "Every activated account scope must be the local account or an account authorized by the central bus."
     }
@@ -195,6 +289,17 @@ module "network" {
   scanner_public_egress_required                         = var.enable_event_dispatch
 }
 
+module "managed_canary" {
+  count  = var.managed_canary_enabled ? 1 : 0
+  source = "../modules/managed-canary"
+
+  name_prefix               = local.name
+  vpc_cidr                  = var.managed_canary_vpc_cidr
+  scanner_source_ipv4_cidrs = local.managed_canary_scanner_source_cidrs
+  instance_type             = var.managed_canary_instance_type
+  listener_port             = 18080
+}
+
 module "storage" {
   source = "../modules/storage"
 
@@ -208,8 +313,10 @@ module "storage" {
   bucket_expiration_days            = var.bucket_expiration_days
   force_destroy_buckets             = var.force_destroy_buckets
   dynamodb_point_in_time_recovery   = var.dynamodb_point_in_time_recovery
-  cloudtrail_source_arns            = compact([local.cloudtrail_arn])
+  cloudtrail_source_arns            = var.cloudtrail_mode == "create" ? compact([local.cloudtrail_arn]) : []
   enable_config_delivery            = var.config_mode == "create"
+  finding_export_enabled            = var.finding_export_enabled
+  enable_cloudtrail_storage         = var.cloudtrail_mode == "create"
   signal_event_rule_arns            = local.signal_rule_arns
 }
 
@@ -245,19 +352,19 @@ module "signals" {
   name_prefix                     = local.name
   signal_queue_arn                = module.storage.queue_arns["signal"]
   signal_dead_letter_queue_arn    = module.storage.dead_letter_queue_arns["signal"]
-  enable_event_dispatch           = var.enable_automatic_inventory
+  enable_event_dispatch           = local.signal_hints_enabled
   config_mode                     = var.config_mode
   config_delivery_bucket_name     = module.storage.bucket_names["events"]
   existing_config_aggregator_name = var.existing_config_aggregator_name
   cloudtrail_mode                 = var.cloudtrail_mode
   existing_cloudtrail_arn         = var.existing_cloudtrail_arn
   cloudtrail_name                 = local.cloudtrail_name
-  cloudtrail_bucket_name          = module.storage.bucket_names["cloudtrail"]
+  cloudtrail_bucket_name          = try(module.storage.bucket_names["cloudtrail"], null)
   create_central_event_bus        = var.create_central_event_bus
   allowed_member_account_ids      = var.allowed_member_account_ids
   allowed_organization_id         = var.allowed_organization_id
-  authorized_account_ids          = var.authorized_account_ids
-  config_aggregator_account_ids   = var.authorized_account_ids
+  authorized_account_ids          = local.effective_authorized_account_ids
+  config_aggregator_account_ids   = local.effective_authorized_account_ids
 
   depends_on = [module.storage]
 }
@@ -275,6 +382,7 @@ module "identities" {
   eks_cluster_arn                 = local.eks_cluster_arn
   member_collector_role_arns      = values(var.member_collector_role_arns)
   target_event_object_prefix      = "target-events/aws/"
+  finding_export_enabled          = var.finding_export_enabled
 }
 
 module "functions" {
@@ -284,7 +392,11 @@ module "functions" {
   deploy_runtime                       = var.deploy_runtime
   run_migration                        = var.run_migration
   enable_event_dispatch                = var.enable_event_dispatch
-  enable_automatic_inventory           = var.enable_automatic_inventory
+  periodic_snapshots_enabled           = local.periodic_snapshots_enabled
+  periodic_coverage_enabled            = local.periodic_coverage_enabled
+  signal_hints_enabled                 = local.signal_hints_enabled
+  processor_reconciliation_enabled     = local.processor_reconciliation_enabled
+  finding_export_enabled               = var.finding_export_enabled
   canary_mode                          = var.canary_mode
   image_digests                        = var.image_digests
   repository_urls                      = module.repositories.repository_urls
@@ -305,11 +417,16 @@ module "functions" {
   snapshot_backend                     = local.snapshot_backend
   snapshot_account_id                  = data.aws_caller_identity.current.account_id
   snapshot_regions                     = local.snapshot_regions
-  allowed_tag_keys                     = var.allowed_tag_keys
-  allowed_target_cidrs                 = var.allowed_target_cidrs
+  allowed_tag_keys                     = local.effective_allowed_tag_keys
+  allowed_eni_interface_types          = local.effective_allowed_eni_interface_types
+  required_target_tag_key              = local.effective_required_target_tag_key
+  required_target_tag_value            = local.effective_required_target_tag_value
+  snapshot_max_pages                   = var.snapshot_max_pages
+  managed_canary                       = local.managed_canary
+  allowed_target_cidrs                 = local.effective_allowed_target_cidrs
   denied_target_cidrs                  = var.denied_target_cidrs
   target_event_prefix                  = "target-events/aws"
-  authorized_account_ids               = var.authorized_account_ids
+  authorized_account_ids               = local.effective_authorized_account_ids
   member_collector_role_arns           = var.member_collector_role_arns
   member_collector_external_ids        = var.member_collector_external_ids
   eks_cluster_name                     = local.cluster_name
@@ -350,7 +467,7 @@ module "eks" {
   existing_interface_endpoint_security_group_ids = module.network.existing_interface_endpoint_security_group_ids
   installer_principal_arns                       = var.eks_installer_principal_arns
   scanner_pod_role_arn                           = module.identities.scanner_pod_role_arn
-  allowed_target_cidrs                           = var.allowed_target_cidrs
+  allowed_target_cidrs                           = local.effective_allowed_target_cidrs
   denied_target_cidrs                            = var.denied_target_cidrs
   operator_max_concurrent_reconciles             = var.operator_max_concurrent_reconciles
   scanner_max_concurrent_pods                    = var.scanner_max_concurrent_pods

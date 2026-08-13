@@ -277,8 +277,14 @@ def test_processes_removal_and_retries_pending_handoffs(
         def __init__(self, _connection: object) -> None:
             pass
 
-        def apply_target_event(self, local: Any, *, finding_bucket: str) -> bool:
-            applied.append((local, finding_bucket))
+        def apply_target_event(
+            self,
+            local: Any,
+            *,
+            finding_bucket: str | None,
+            queue_finding_handoffs: bool,
+        ) -> bool:
+            applied.append((local, finding_bucket, queue_finding_handoffs))
             return False
 
         def pending_target_event_handoff_keys(self, event_id: str) -> tuple[str, ...]:
@@ -311,7 +317,75 @@ def test_processes_removal_and_retries_pending_handoffs(
 
     assert applied[0][0].event_type == "remove"
     assert applied[0][1] == "finding-test"
+    assert applied[0][2] is True
     assert publish_calls == [(("handoff-1",), 1000)]
+
+
+def test_database_only_target_projection_skips_finding_handoffs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    event = _shared_event("target.removed")
+    applied: list[tuple[Any, str | None, bool]] = []
+
+    class S3:
+        def get_object(self, **_kwargs: Any) -> dict[str, Any]:
+            return {
+                "Body": BytesIO(b"{}"),
+                "ContentLength": 2,
+                "ETag": '"etag-1"',
+                "VersionId": "version-1",
+            }
+
+    class ConnectionContext:
+        def __enter__(self) -> object:
+            return object()
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    class FakeRepository:
+        def __init__(self, _connection: object) -> None:
+            pass
+
+        def apply_target_event(
+            self,
+            local: Any,
+            *,
+            finding_bucket: str | None,
+            queue_finding_handoffs: bool,
+        ) -> bool:
+            applied.append((local, finding_bucket, queue_finding_handoffs))
+            return True
+
+    class MustNotPublish:
+        def __init__(self, *_args: object) -> None:
+            raise AssertionError("database-only target projection created a publisher")
+
+    settings = TargetEventSettings(
+        target_event_bucket="target-event-test",
+        target_event_prefix="target-events/aws/",
+        finding_bucket=None,
+        database_dsn="unused",
+        finding_export_enabled=False,
+        max_event_bytes=1024,
+    )
+    monkeypatch.setattr(target_handler, "parse_target_event", lambda _document: event)
+    monkeypatch.setattr(target_handler.psycopg, "connect", lambda _dsn: ConnectionContext())
+    monkeypatch.setattr(target_handler, "Repository", FakeRepository)
+    monkeypatch.setattr(target_handler, "HandoffPublisher", MustNotPublish)
+
+    target_handler._process_target_event(
+        s3=S3(),
+        settings=settings,
+        reference=target_handler.S3ObjectReference(
+            "target-event-test",
+            "target-events/aws/event.json",
+            "etag-1",
+            "version-1",
+        ),
+    )
+
+    assert applied == [(target_handler._local_target_event(event), None, False)]
 
 
 def test_lambda_redrives_retryable_and_permanent_batch_failures(

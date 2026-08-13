@@ -156,7 +156,7 @@ def ownership_service_from_environment(
     from portscanner_inventory.aws.session import AwsClientFactory
     from portscanner_inventory.state import DynamoStateStore
 
-    table_name = state_table or env.get("INVENTORY_TABLE") or env.get("TARGET_TABLE_NAME")
+    table_name = state_table or env.get("INVENTORY_TABLE")
     if not table_name:
         raise RuntimeError("inventory ownership state table is not configured")
     if session is None:
@@ -175,8 +175,20 @@ def ownership_service_from_environment(
             {value.strip() for value in env.get("ALLOWED_TAG_KEYS", "").split(",") if value.strip()}
         )
     )
+    allowed_interface_types = tuple(
+        sorted(
+            {
+                value.strip()
+                for value in env.get("ALLOWED_ENI_INTERFACE_TYPES", "").split(",")
+                if value.strip()
+            }
+        )
+    )
     return OwnershipValidator(
         state,
         factory,
         allowed_tag_keys=allowed_tags,
+        allowed_interface_types=allowed_interface_types,
+        required_tag_key=env.get("REQUIRED_TARGET_TAG_KEY") or None,
+        required_tag_value=env.get("REQUIRED_TARGET_TAG_VALUE") or None,
     )

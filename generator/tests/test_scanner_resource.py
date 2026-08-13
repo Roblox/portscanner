@@ -116,6 +116,22 @@ class ScannerResourceTests(unittest.TestCase):
                     label,
                 )
 
+    def test_managed_canary_targeted_port_is_preserved_exactly(self) -> None:
+        document = event_document(reason="new_target")
+        scan = document["scan"]
+        assert isinstance(scan, dict)
+        scan["profile"] = "targeted-tcp"
+        scan["tcp_port_ranges"] = [{"start": 18080, "end": 18080}]
+
+        body = build_scanner_resource(
+            parse_test_event(document),
+            namespace="scanner-system",
+        )
+
+        self.assertEqual(body["spec"]["profile"], "targeted-tcp")
+        self.assertEqual(body["spec"]["ports"], [18080])
+        self.assertEqual(body["spec"]["ranges"], [])
+
     def test_labels_and_name_never_contain_raw_target_data(self) -> None:
         event = parse_test_event(event_document())
         body = build_scanner_resource(
@@ -126,7 +142,7 @@ class ScannerResourceTests(unittest.TestCase):
         serialized_labels = " ".join(f"{key}={value}" for key, value in labels.items())
 
         self.assertNotIn(event.target.target_id, serialized_labels)
-        self.assertNotIn(event.target.address, serialized_labels)
+        self.assertNotIn(event.target.public_address, serialized_labels)
         self.assertEqual(
             labels[TARGET_HASH_LABEL],
             target_hash(event.target.target_id),

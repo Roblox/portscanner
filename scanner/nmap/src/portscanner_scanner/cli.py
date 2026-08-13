@@ -128,16 +128,6 @@ def build_parser() -> argparse.ArgumentParser:
         help="explicit TCP ports/ranges for targeted-tcp or deep",
     )
     parser.add_argument(
-        "--scan-mode",
-        choices=("fast", "targeted", "deep"),
-        help="operator compatibility field; must agree with --profile",
-    )
-    parser.add_argument(
-        "--service-detection",
-        action="store_true",
-        help="operator compatibility field valid only for deep",
-    )
-    parser.add_argument(
         "--deep-script",
         action="append",
         default=_environment_list("NMAP_DEEP_SCRIPTS"),
@@ -301,15 +291,6 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _request_from_args(args: argparse.Namespace) -> ScanRequest:
-    expected_mode = {
-        ScanProfile.FAST_FULL_TCP.value: "fast",
-        ScanProfile.TARGETED_TCP.value: "targeted",
-        ScanProfile.DEEP.value: "deep",
-    }[args.profile]
-    if args.scan_mode is not None and args.scan_mode != expected_mode:
-        raise ValueError("--scan-mode conflicts with --profile")
-    if args.service_detection and args.profile != ScanProfile.DEEP.value:
-        raise ValueError("--service-detection is only valid for deep")
     return ScanRequest(
         target=args.target,
         profile=args.profile,

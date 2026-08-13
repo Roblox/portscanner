@@ -7,7 +7,7 @@ max_binary_bytes = 524288
 
 # Binary files are denied by default. An intentionally distributable binary must be
 # reviewed and listed as an exact repository-relative path plus lowercase SHA-256:
-# { path = "docs/example.png", sha256 = "<64 lowercase hex characters>" }
+# { path = "examples/approved-diagram.png", sha256 = "<64 lowercase hex characters>" }
 binary_allowlist = []
 
 # These are the only account-shaped fixtures accepted in fixture-scoped paths.
@@ -20,13 +20,13 @@ synthetic_fixture_paths = [
   "**/tests/**",
   "operator/**/*_test.go",
   "operator/config/samples/**",
-  "docs/**",
   "examples/**",
   "terraform/aws/**/*.tftest.hcl",
   "terraform/aws/examples/**",
   "tools/sanitize-policy.toml",
 ]
 synthetic_aws_resource_ids = [
+  "ami-0123456789abcdef0",
   "eipalloc-cccccccc",
   "eipassoc-dddddddd",
   "eni-00000000",
@@ -95,6 +95,8 @@ synthetic_aws_arns = [
   "arn:aws:iam::123456789012:role/test-signals",
   "arn:aws:iam::123456789012:role/test-snapshot",
   "arn:aws:iam::123456789012:role/test-target-projector",
+  "arn:aws:s3:::test-events",
+  "arn:aws:s3:::test-results",
   "arn:aws:sqs:us-east-1:123456789012:test-coverage",
   "arn:aws:sqs:us-east-1:123456789012:test-priority",
   "arn:aws:sqs:us-east-1:123456789012:test-result",
@@ -102,6 +104,13 @@ synthetic_aws_arns = [
   "arn:aws:sqs:us-east-1:123456789012:test-signal-dlq",
   "arn:aws:sqs:us-east-1:123456789012:test-target-event",
   "arn:aws:dynamodb:us-east-1:123456789012:table/test-inventory/stream/2026-08-07T00:00:00.000",
+  "arn:aws:dynamodb:us-east-1:123456789012:table/test-inventory",
+  "arn:aws:dynamodb:us-east-1:123456789012:table/test-dispatch",
+  "arn:aws:dynamodb:us-east-1:123456789012:table/test-inventory/stream/test",
+  "arn:aws:dynamodb:us-east-1:123456789012:table/test-eval-state-terraform-locks",
+  "arn:aws:eks:us-east-1:123456789012:cluster/test",
+  "arn:aws:lambda:us-east-1:123456789012:function:test-snapshot",
+  "arn:aws:lambda:us-east-1:123456789012:function:test-processor",
   "arn:aws:secretsmanager:us-east-1:123456789012:secret:test-application",
   "arn:aws:secretsmanager:us-east-1:123456789012:secret:test-master",
 ]
