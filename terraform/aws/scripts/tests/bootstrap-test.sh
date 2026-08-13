@@ -10,6 +10,17 @@ fail() {
   exit 1
 }
 
+file_mode() {
+  python3 - "$1" <<'PY'
+import pathlib
+import stat
+import sys
+
+mode = stat.S_IMODE(pathlib.Path(sys.argv[1]).stat().st_mode)
+print(f"{mode:03o}")
+PY
+}
+
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/portscanner-bootstrap-test.XXXXXX")"
 cleanup() {
   rm -rf -- "${WORK_DIR}"
@@ -304,7 +315,7 @@ run_bootstrap >"${WORK_DIR}/first-output" 2>"${WORK_DIR}/first-error" ||
 
 for generated_file in "${BOOTSTRAP_STATE}" "${BACKEND_CONFIG}" "${IMAGE_INPUTS}"; do
   [[ -f "${generated_file}" ]] || fail "bootstrap did not generate ${generated_file}"
-  GENERATED_MODE="$(stat -f '%Lp' "${generated_file}" 2>/dev/null || stat -c '%a' "${generated_file}")"
+  GENERATED_MODE="$(file_mode "${generated_file}")"
   [[ "${GENERATED_MODE}" == "600" ]] ||
     fail "generated file was not mode 0600: ${generated_file}"
 done

@@ -155,6 +155,7 @@ module "portscanner" {
   image_digests          = var.image_digests
   migration_checksum     = var.migration_checksum
 
+  eks_namespace                = "portscanner-system"
   eks_endpoint_public_access   = true
   eks_public_access_cidrs      = [var.environment.runner.restricted_public_cidr]
   eks_installer_principal_arns = [var.environment.runner.eks_installer_principal_arn]
