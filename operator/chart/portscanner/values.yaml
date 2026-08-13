@@ -67,11 +67,6 @@ scanner:
     create: true
     name: ""
     annotations: {}
-    automountServiceAccountToken: false
-  rbac:
-    create: true
-    # Scanner Jobs need no Kubernetes permissions by default.
-    rules: []
   authorization:
     # Optional deployment policy. Empty allowedCidrs leaves account/ownership
     # authorization as the scope gate; scanner-enforced denies still apply first.

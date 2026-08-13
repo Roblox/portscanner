@@ -48,10 +48,9 @@ use [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and operator startup smoke.
 - Publication sanitizer with a denylist policy and unit tests.
 - CI definitions for source/schema tests, generated drift, Terraform, Kubernetes/Helm,
-  containers, CodeQL, license/REUSE, secret scanning, publication sanitization, and a
-  disabled manual AWS sandbox.
-- Security, contribution, conduct, issue, pull request, dependency update, pre-commit,
-  and secret-scanning policies.
+  containers, CodeQL, license/REUSE, secret scanning, and publication sanitization.
+- Security, issue, pull request, dependency update, pre-commit, and secret-scanning
+  policies.
 - Helm-only Kubernetes packaging, optional finding export, and a PostgreSQL-first
   default deployment boundary.
 

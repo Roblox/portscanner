@@ -72,16 +72,20 @@ class ReleasePackagingTests(unittest.TestCase):
     def test_operator_image_packages_repository_legal_files(self) -> None:
         operator_root = ROOT / "operator"
         self.assertEqual((operator_root / "LICENSE").read_bytes(), (ROOT / "LICENSE").read_bytes())
-        self.assertEqual(
-            (operator_root / "THIRD_PARTY_NOTICES.md").read_bytes(),
-            (ROOT / "THIRD_PARTY_NOTICES.md").read_bytes(),
-        )
+        operator_notices = (operator_root / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
+        self.assertIn("## Go operator", operator_notices)
+        self.assertIn("/licenses/Apache-2.0.txt", operator_notices)
         dockerfile = (operator_root / "Dockerfile").read_text(encoding="utf-8")
         self.assertIn('org.opencontainers.image.licenses="MIT"', dockerfile)
         self.assertIn("COPY --from=builder /workspace/LICENSE /licenses/LICENSE", dockerfile)
         self.assertIn(
             "COPY --from=builder /workspace/THIRD_PARTY_NOTICES.md "
             "/licenses/THIRD_PARTY_NOTICES.md",
+            dockerfile,
+        )
+        self.assertIn(
+            "COPY --from=builder /workspace/third-party-licenses/Apache-2.0.txt "
+            "/licenses/Apache-2.0.txt",
             dockerfile,
         )
 
@@ -145,14 +149,12 @@ class ReleasePackagingTests(unittest.TestCase):
             "**/credentials.json",
             "**/*.pem",
         }
-        for relative_path in (".dockerignore", "operator/.dockerignore"):
-            with self.subTest(path=relative_path):
-                patterns = {
-                    line.strip()
-                    for line in (ROOT / relative_path).read_text(encoding="utf-8").splitlines()
-                    if line.strip() and not line.startswith("#")
-                }
-                self.assertTrue(required_patterns <= patterns)
+        patterns = {
+            line.strip()
+            for line in (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.startswith("#")
+        }
+        self.assertTrue(required_patterns <= patterns)
 
     def test_container_workflow_watches_shared_build_inputs(self) -> None:
         workflow = (ROOT / ".github/workflows/containers.yml").read_text(encoding="utf-8")

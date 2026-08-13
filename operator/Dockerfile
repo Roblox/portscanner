@@ -11,10 +11,11 @@ ARG TARGETOS
 ARG TARGETARCH
 WORKDIR /workspace
 
-COPY go.mod go.sum ./
+COPY operator/go.mod operator/go.sum ./
 RUN go mod download
 
-COPY . .
+COPY operator .
+COPY LICENSES/Apache-2.0.txt /workspace/third-party-licenses/Apache-2.0.txt
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} \
     go build -buildvcs=false -trimpath -tags="netgo,osusergo" \
     -ldflags="-s -w" -o /out/manager ./cmd/manager
@@ -25,5 +26,6 @@ LABEL org.opencontainers.image.source="https://github.com/Roblox/portscanner" \
 COPY --from=builder --chmod=0555 /out/manager /manager
 COPY --from=builder /workspace/LICENSE /licenses/LICENSE
 COPY --from=builder /workspace/THIRD_PARTY_NOTICES.md /licenses/THIRD_PARTY_NOTICES.md
+COPY --from=builder /workspace/third-party-licenses/Apache-2.0.txt /licenses/Apache-2.0.txt
 USER 65532:65532
 ENTRYPOINT ["/manager"]

@@ -25,7 +25,6 @@ from portscanner_scanner.nmap import (
     ProcessResult,
     SubprocessRunner,
 )
-from portscanner_scanner.parser import parse_authoritative_result
 from portscanner_scanner.worker import (
     ScanExecutionError,
     ScanRequest,
@@ -362,21 +361,11 @@ def test_enrichment_port_change_is_partial_unknown_without_enrichment_reference(
 
     assert captured.value.error_type == "enrichment_port_set_changed"
     assert [operation[0] for operation in writer.operations] == ["file", "bytes"]
-    raw_discovery = writer.operations[0][2]
     failed = json.loads(writer.operations[-1][2])
     assert failed["outcome"] == "partial"
     assert failed["coverage"]["complete"] is False
     assert failed["raw_result"]["enrichment"] is None
     assert failed["scan_result"]["open_tcp_ports"] == []
-    parsed = parse_authoritative_result(failed, raw_discovery)
-    assert parsed["observations"] == [
-        {
-            "protocol": "tcp",
-            "port": 80,
-            "state": "UNKNOWN",
-            "nmap_state": "open",
-        }
-    ]
 
 
 def test_cli_runs_with_fake_nmap_and_s3(

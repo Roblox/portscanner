@@ -7,13 +7,48 @@ SPDX-License-Identifier: MIT
 
 Portscanner is a self-hosted system for continuously verifying the
 Internet-facing ports of cloud assets you are authorized to test. It discovers
-current AWS ownership, dispatches bounded Nmap jobs from Kubernetes, and stores
+current AWS ownership, dispatches bounded Nmap Jobs in Kubernetes, and stores
 generation-safe exposures and findings in PostgreSQL.
 
 > Only scan assets you own or are explicitly authorized to test. The AWS
 > evaluation creates EKS, Aurora, NAT, EC2, queues, buckets, and supporting
-> services that incur charges. Dispatch stays off except for one managed
-> canary until you explicitly activate an integration.
+> services that incur charges. Only the managed-canary evaluation briefly
+> enables dispatch; account inventory stays paused until you activate it.
+
+## Architecture at a glance
+
+The solid path is the default one-target evaluation; dashed paths require
+explicit opt-in. Snapshots are authoritative and change signals only trigger a
+current-state reread. For the design motivation, watch
+[Minutes from Malice](https://tinyurl.com/minutes-from-malice).
+
+```mermaid
+flowchart LR
+    canary["Default EC2 canary: TCP 18080"]
+    accounts["Opt-in AWS accounts and change hints"]
+    inventory["Inventory Lambdas and DynamoDB outbox"]
+    generator["Generator and ownership revalidation"]
+    operator["EKS operator"]
+    scanner["Bounded Nmap Job"]
+    projector["Target projector"]
+    results["Result in S3 and SQS"]
+    parser["Parser Lambda"]
+    database["Aurora PostgreSQL"]
+    export["Opt-in finding export"]
+
+    canary -->|"Scoped EC2 snapshot"| inventory
+    accounts -.-> inventory
+    inventory -->|"TargetEvent in S3 and SQS"| generator
+    generator --> operator
+    operator --> scanner
+    scanner -->|"TCP connect through NAT"| canary
+    inventory --> projector
+    scanner --> results
+    projector --> database
+    results --> parser
+    parser --> database
+    database -.-> export
+```
 
 ## Try it locally
 
@@ -26,7 +61,9 @@ make check
 ```
 
 `make ci` adds PostgreSQL, Go/envtest, Terraform, Helm, and publication checks.
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the complete development workflow.
+Contributions must use synthetic fixtures, preserve authorization and
+`UNKNOWN` semantics, commit generated outputs, and pass `make ci`. New source
+adapters must follow [inventory/README.md](inventory/README.md).
 
 ## Evaluate the AWS stack
 
@@ -83,16 +120,13 @@ Activation is never implied by installation. Signals only accelerate work;
 authoritative snapshots and immediate provider ownership rereads remain the
 scan gate.
 
-## How it works
+## Safety model
 
-1. **Discover** complete provider inventory and record stable target
-   generations.
-2. **Prioritize** new, changed, and periodic coverage work under explicit
-   account, CIDR, profile, rate, Pod, and Job limits.
-3. **Verify** current ownership immediately before creating one digest-pinned
-   Scanner Job.
-4. **Act** on complete evidence; failed or incomplete work remains `UNKNOWN`
-   and never silently closes an exposure.
+Inventory records stable target generations, and the generator rereads current
+provider ownership immediately before creating a digest-pinned Scanner Job.
+Explicit account, CIDR, profile, rate, Pod, and Job limits bound dispatch;
+failed or incomplete evidence remains `UNKNOWN` and never silently closes an
+exposure.
 
 ## Supported scope
 
@@ -118,6 +152,5 @@ Synthetic contracts are in `examples/`; generated JSON Schemas are in
 ## Project policy
 
 Portscanner is MIT licensed. Report vulnerabilities privately through
-[SECURITY.md](SECURITY.md), follow [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md),
-and review [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for bundled
-dependencies.
+[SECURITY.md](SECURITY.md), and review
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for bundled dependencies.

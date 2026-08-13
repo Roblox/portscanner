@@ -311,7 +311,8 @@ class DispatchTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.states = iter(("UNKNOWN", "STALE"))
 
-            def revalidate(self, _target: object, generation: int) -> dict[str, object]:
+            def validate_event(self, event: object) -> dict[str, object]:
+                generation = event.target.generation  # type: ignore[attr-defined]
                 return {
                     "state": next(self.states),
                     "requested_generation": generation,
@@ -353,7 +354,8 @@ class DispatchTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.states = iter(("ACTIVE", "MOVED"))
 
-            def revalidate(self, _target: object, generation: int) -> dict[str, object]:
+            def validate_event(self, event: object) -> dict[str, object]:
+                generation = event.target.generation  # type: ignore[attr-defined]
                 return {
                     "state": next(self.states),
                     "requested_generation": generation,

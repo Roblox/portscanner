@@ -150,7 +150,7 @@ CONTEXTS=(
   .
   .
   .
-  operator
+  .
   .
 )
 

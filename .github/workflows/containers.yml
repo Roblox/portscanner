@@ -91,7 +91,6 @@ jobs:
               text=True,
           )
           component_contexts = {
-              "operator/Dockerfile": "operator",
               "scanner/nmap/Dockerfile": ".",
           }
           python_images = {

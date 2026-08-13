@@ -64,7 +64,7 @@ verify-manifests:
 
 .PHONY: docker-build
 docker-build:
-	docker build --tag $(IMG) .
+	docker build --file Dockerfile --tag $(IMG) ..
 
 $(CONTROLLER_GEN):
 	mkdir -p $(LOCALBIN)

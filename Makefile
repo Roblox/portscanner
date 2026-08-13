@@ -151,6 +151,6 @@ containers:
 	$(PYTHON) tools/build_tracked_image.py --dockerfile processor/Dockerfile --tag portscanner-processor:test
 	$(PYTHON) tools/build_tracked_image.py --dockerfile db/migrator/Dockerfile --tag portscanner-migrator:test
 	$(PYTHON) tools/build_tracked_image.py --dockerfile scanner/nmap/Dockerfile --tag portscanner-scanner:test
-	$(PYTHON) tools/build_tracked_image.py --dockerfile operator/Dockerfile --context operator --tag portscanner-operator:test
+	$(PYTHON) tools/build_tracked_image.py --dockerfile operator/Dockerfile --tag portscanner-operator:test
 
 ci: check test-postgresql test-go test-go-envtest vet-go sanitize terraform-script-tests terraform-validate kubernetes-validate

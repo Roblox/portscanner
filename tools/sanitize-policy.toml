@@ -211,13 +211,9 @@ id = "public-owner-name"
 pattern = '''(?i)\broblox\b'''
 allow_paths = [
   "LICENSE",
-  "NOTICE",
-  "NOTICE.md",
   "LICENSES/**",
   "THIRD_PARTY_NOTICES.md",
   "**/LICENSE",
-  "**/NOTICE",
-  "**/NOTICE.md",
 ]
 allow_patterns = [
   '''(?:https://)?github\.com/Roblox/portscanner(?:/[A-Za-z0-9._~/%#?=:+-]*)?''',

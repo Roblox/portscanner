@@ -183,9 +183,8 @@ the container runtime sends `SIGKILL`.
 
 Consumers must treat the envelope as the authoritative source for event,
 trace, run, attempt, target-generation, profile, and coverage fields. The
-included parser validates the shared `ScanResultEnvelope` and nested
-`ScanResult`, verifies the XML SHA-256, checks target/coverage consistency, and
-ignores correlation-like XML attributes.
+deployed parser Lambda validates the shared `ScanResultEnvelope`, nested
+`ScanResult`, XML SHA-256, and target/coverage consistency.
 
 ## Container runtime
 
