@@ -88,6 +88,24 @@ mkdir -p "${WORK_DIR}/root" "${WORK_DIR}/bin"
 touch "${WORK_DIR}/root/main.tf" "${WORK_DIR}/backend.hcl" "${WORK_DIR}/images.tfvars"
 chmod 600 "${WORK_DIR}/backend.hcl" "${WORK_DIR}/images.tfvars"
 
+cat >"${WORK_DIR}/bin/stat" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "-f" ]]; then
+  echo "simulated GNU stat filesystem output"
+  exit 1
+fi
+[[ "${1:-}" == "-c" && "${2:-}" == "%a" && $# -eq 3 ]]
+python3 - "$3" <<'PY'
+import pathlib
+import stat
+import sys
+
+print(f"{stat.S_IMODE(pathlib.Path(sys.argv[1]).stat().st_mode):03o}")
+PY
+EOF
+chmod 755 "${WORK_DIR}/bin/stat"
+
 cat >"${WORK_DIR}/bin/terraform" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail

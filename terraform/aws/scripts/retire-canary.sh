@@ -18,10 +18,13 @@ require_command() {
 }
 
 file_mode() {
-  if stat -f '%Lp' "$1" 2>/dev/null; then
-    return
+  local path="$1"
+  local mode
+  if mode="$(stat -f '%Lp' "${path}" 2>/dev/null)"; then
+    printf '%s' "${mode}"
+  else
+    stat -c '%a' "${path}"
   fi
-  stat -c '%a' "$1"
 }
 
 ROOT=""
