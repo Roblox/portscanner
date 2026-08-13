@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from ipaddress import IPv4Address
 
 import pytest
+from portscanner_contracts import parse_target_event
 
 from portscanner_inventory.base import (
     OwnershipCheck,
@@ -13,7 +14,7 @@ from portscanner_inventory.base import (
     SnapshotBatch,
     SnapshotScope,
 )
-from portscanner_inventory.config import Settings
+from portscanner_inventory.config import ManagedCanary, Settings
 from portscanner_inventory.events import snapshot_source
 from portscanner_inventory.handlers.snapshot import (
     _requested_account_id,
@@ -89,6 +90,22 @@ def test_snapshot_request_must_remain_inside_configured_account_and_regions() ->
         _requested_region({"region": "us-west-2"}, settings)
 
 
+def test_unauthorized_snapshot_account_is_rejected_before_aws_or_state_access() -> None:
+    settings = Settings(
+        state_table="inventory",
+        event_bucket="events",
+        snapshot_backend="ec2",
+        account_id="123456789012",
+        authorized_account_ids=("123456789012",),
+        regions=("us-east-1",),
+    )
+    runtime = _Runtime.__new__(_Runtime)
+    runtime.settings = settings
+
+    with pytest.raises(ValueError, match="authorized account scope"):
+        runtime.process({"account_id": "222222222222"})
+
+
 def test_canary_rejects_present_but_null_region_before_backend_access() -> None:
     settings = Settings(
         state_table="inventory",
@@ -110,6 +127,116 @@ def test_canary_rejects_present_but_null_region_before_backend_access() -> None:
                 "target_public_ipv4": _global_ipv4(),
             }
         )
+
+
+def test_managed_canary_rejects_caller_target_overrides_before_backend_access() -> None:
+    canary = ManagedCanary(
+        account_id="123456789012",
+        region="us-east-1",
+        network_interface_id="eni-aaaaaaaa",
+        private_ip="10.0.0.10",
+        public_ip=_global_ipv4(),
+        tag_key="service",
+        tag_value="managed-canary",
+        tcp_port=18080,
+    )
+    settings = Settings(
+        state_table="inventory",
+        event_bucket="events",
+        snapshot_backend="ec2",
+        account_id="123456789012",
+        authorized_account_ids=("123456789012",),
+        regions=("us-east-1",),
+        canary_mode=True,
+        managed_canary=canary,
+        allowed_target_cidrs=(),
+    )
+    runtime = _Runtime.__new__(_Runtime)
+    runtime.settings = settings
+
+    with pytest.raises(ValueError, match="does not accept target overrides"):
+        runtime.process(
+            {
+                "operation": "managed-canary",
+                "target_public_ipv4": "198.51.100.1",
+            }
+        )
+
+
+def test_managed_canary_snapshot_writes_only_exact_targeted_tcp_event() -> None:
+    public_ip = _global_ipv4()
+    canary = ManagedCanary(
+        account_id="123456789012",
+        region="us-east-1",
+        network_interface_id="eni-aaaaaaaa",
+        private_ip="10.0.0.10",
+        public_ip=public_ip,
+        tag_key="service",
+        tag_value="managed-canary",
+        tcp_port=18080,
+    )
+    target = normalized_target(
+        public_ip=public_ip,
+        tags=[{"Key": "service", "Value": "managed-canary"}],
+    )
+    outside = replace(
+        normalized_target(public_ip="203.0.113.30"),
+        network_interface_id="eni-bbbbbbbb",
+        private_ip="10.0.1.10",
+    )
+    dynamo = FakeDynamo()
+    store = DynamoStateStore(dynamo, "inventory")
+
+    summary = reconcile_snapshot(
+        Backend(
+            SnapshotBatch(
+                scope=SCOPE,
+                targets=(target, outside),
+                completion=ScopeCompletion.COMPLETE,
+                pages=1,
+            )
+        ),
+        store,
+        Ownership(OwnershipVerdict.ACTIVE),
+        now=NOW,
+        target_public_ipv4=public_ip,
+        require_exact_target=True,
+        target_allowed=lambda address: address == public_ip,
+        managed_canary=canary,
+    )
+
+    outbox = next(item for (pk, _sk), item in dynamo.items.items() if pk.startswith("OUTBOX#"))
+    event = parse_target_event(outbox["event_json"]["S"])
+    assert summary["targets"] == 1
+    assert event.scan.reason.value == "new_target"
+    assert event.scan.profile.value == "targeted-tcp"
+    assert [(item.start, item.end) for item in event.scan.tcp_port_ranges] == [(18080, 18080)]
+    assert store.get(outside.target_id) is None
+
+
+def test_snapshot_cidr_scope_filters_before_state_mutation() -> None:
+    dynamo = FakeDynamo()
+    store = DynamoStateStore(dynamo, "inventory")
+    target = normalized_target(public_ip=_global_ipv4())
+
+    summary = reconcile_snapshot(
+        Backend(
+            SnapshotBatch(
+                scope=SCOPE,
+                targets=(target,),
+                completion=ScopeCompletion.COMPLETE,
+                pages=1,
+            )
+        ),
+        store,
+        Ownership(OwnershipVerdict.ACTIVE),
+        now=NOW,
+        target_allowed=lambda _address: False,
+    )
+
+    assert summary["targets"] == 0
+    assert dynamo.transactions == 0
+    assert store.list_current(SCOPE) == ()
 
 
 def test_target_scoped_snapshot_reconciles_only_canary_without_removals() -> None:

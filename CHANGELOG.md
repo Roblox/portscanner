@@ -8,19 +8,18 @@ SPDX-License-Identifier: MIT
 All notable changes to this project will be documented here.
 
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and releases
-will use [Semantic Versioning](https://semver.org/spec/v2.0.0.html) after the initial
-public version is tagged.
+use [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [1.0.0] - 2026-08-12
 
 ### Added
 
 - Public architecture and operating model using
   **DISCOVER → PRIORITIZE → VERIFY → ACT**.
-- AWS deployment, configuration, operations, security, scanning safety, data handling,
-  testing, cost, and multi-account documentation.
-- Implementation contract and review checklist for new inventory snapshots and change
-  signal sources.
+- Concise root and component guides for the AWS deployment, inventory sources,
+  contracts, scanning, operations, safety, and finding integrations.
 - Versioned TargetEvent, ScanResultEnvelope, and Finding contracts with generated JSON
   Schemas and synthetic examples.
 - AWS Config and direct-EC2 inventory snapshots, CloudTrail/EventBridge signal
@@ -33,10 +32,9 @@ public version is tagged.
 - Staged Terraform for single-account and optional hub/spoke AWS deployment, including
   private EKS/Aurora, secure queues and buckets, alarms, image publication, and paused
   activation gates.
-- Guarded single-account evaluation quickstart with fail-closed account/Region checks, a
-  one-target snapshot invocation, separate canary/automatic dispatch gates, conservative
-  scanner tuning, optional CloudTrail, restricted EKS API access, explicit pause,
-  scanner egress output, and downstream finding handoff guidance.
+- Guarded single-account evaluation with one environment file, resumable state/image
+  bootstrap, a Terraform-managed one-port canary, fail-closed account/Region checks,
+  conservative scanner tuning, restricted EKS API access, and automatic return to pause.
 - Hard scanner-Pod quotas, per-destination serialization, generator-side CIDR
   enforcement, endpoint-mode public-egress checks, and an AWS-only emergency dispatch
   brake.
@@ -50,10 +48,11 @@ public version is tagged.
   and operator startup smoke.
 - Publication sanitizer with a denylist policy and unit tests.
 - CI definitions for source/schema tests, generated drift, Terraform, Kubernetes/Helm,
-  containers, CodeQL, license/REUSE, secret scanning, publication sanitization, and a
-  disabled manual AWS sandbox.
-- Security, contribution, conduct, issue, pull request, dependency update, pre-commit,
-  and secret-scanning policies.
+  containers, CodeQL, license/REUSE, secret scanning, and publication sanitization.
+- Security, issue, pull request, dependency update, pre-commit, and secret-scanning
+  policies.
+- Helm-only Kubernetes packaging, optional finding export, and a PostgreSQL-first
+  default deployment boundary.
 
 ### Security
 
@@ -62,4 +61,5 @@ public version is tagged.
   per-destination serialization.
 - Incomplete inventory or scan evidence is explicitly preserved as UNKNOWN.
 
-[Unreleased]: https://github.com/Roblox/portscanner/commits/main
+[Unreleased]: https://github.com/Roblox/portscanner/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/Roblox/portscanner/releases/tag/v1.0.0

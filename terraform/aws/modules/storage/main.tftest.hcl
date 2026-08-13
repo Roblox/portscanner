@@ -60,3 +60,50 @@ run "reject_visibility_below_lambda_multiplier" {
 
   expect_failures = [terraform_data.storage_validation]
 }
+
+run "database_boundary_omits_finding_integration" {
+  command = plan
+
+  variables {
+    finding_export_enabled = false
+  }
+
+  assert {
+    condition = (
+      !contains(keys(aws_s3_bucket.data), "findings") &&
+      !contains(keys(aws_sqs_queue.main), "finding") &&
+      !contains(keys(aws_sqs_queue.dead_letter), "finding") &&
+      !contains(keys(aws_cloudwatch_metric_alarm.queue_age), "finding") &&
+      !contains(keys(aws_cloudwatch_metric_alarm.dead_letter_messages), "finding") &&
+      length(aws_s3_bucket_notification.findings) == 0
+    )
+    error_message = "Database-only mode must omit all finding export storage, notifications, and alarms."
+  }
+
+  assert {
+    condition = (
+      output.finding_bucket_name == null &&
+      output.finding_bucket_arn == null &&
+      output.finding_queue_url == null &&
+      output.finding_queue_arn == null
+    )
+    error_message = "Disabled finding export outputs must be safely nullable."
+  }
+}
+
+run "disabled_cloudtrail_storage_is_nullable" {
+  command = plan
+
+  variables {
+    enable_cloudtrail_storage = false
+    cloudtrail_source_arns    = []
+  }
+
+  assert {
+    condition = (
+      !contains(keys(aws_s3_bucket.data), "cloudtrail") &&
+      output.cloudtrail_bucket_name == null
+    )
+    error_message = "Disabled CloudTrail mode must not retain an unused CloudTrail bucket."
+  }
+}

@@ -11,7 +11,7 @@ body:
     attributes:
       value: |
         Describe the problem and safety boundary, not a live environment. New source
-        proposals should follow docs/adding-sources.md.
+        proposals should follow inventory/README.md.
 
   - type: checkboxes
     id: checks

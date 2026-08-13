@@ -1,5 +1,5 @@
-# Copyright 2026 Roblox Corporation
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Portscanner contributors
+# SPDX-License-Identifier: MIT
 
 # 192.0.2.0/24 is reserved by RFC 5737 for documentation and is not a real
 # Internet scan target.

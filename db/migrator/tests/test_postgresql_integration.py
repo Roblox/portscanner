@@ -42,13 +42,13 @@ def _has_direct_connect(connection: Any, role_name: str) -> bool:
     )
 
 
-def _assert_direct_rollback_revokes_managed_connect(
+def _assert_baseline_rollback(
     connection: Any,
     migrator: Migrator,
     *,
     public_connect_baseline: bool,
 ) -> None:
-    assert migrator.down(target="000003", steps=None) == ["000004"]
+    assert migrator.down(target="000000", steps=None) == ["000001"]
     assert not _has_direct_connect(connection, "act_runtime_test")
     assert (
         connection.execute(
@@ -62,6 +62,56 @@ def _assert_direct_rollback_revokes_managed_connect(
         ).fetchone()[0]
         is public_connect_baseline
     )
+    assert connection.execute("SELECT to_regnamespace('act')").fetchone()[0] is None
+    assert connection.execute(
+        "SELECT rolcanlogin FROM pg_catalog.pg_roles WHERE rolname = 'act_runtime_test'"
+    ).fetchone() == (True,)
+
+
+def _assert_seeded_detection_rules(connection: Any) -> None:
+    rows = connection.execute(
+        """
+        SELECT rule_key, name, description, enabled, severity, rule_type, match_criteria
+        FROM act.detection_rules
+        ORDER BY rule_key
+        """
+    ).fetchall()
+
+    assert rows == [
+        (
+            "common-public-database-port",
+            "Common public database port",
+            "A commonly used database or data service port is currently reachable.",
+            True,
+            "high",
+            "port",
+            {
+                "protocols": ["tcp"],
+                "ports": [1433, 1521, 3306, 5432, 6379, 9042, 9200, 27017],
+            },
+        ),
+        (
+            "common-public-management-port",
+            "Common public management port",
+            "A commonly used remote administration or management port is currently reachable.",
+            True,
+            "high",
+            "port",
+            {
+                "protocols": ["tcp"],
+                "ports": [22, 23, 2375, 2376, 3389, 5900, 5985, 5986, 6443],
+            },
+        ),
+        (
+            "new-or-reopened-exposure",
+            "New or reopened network exposure",
+            "A network service is currently reachable and was newly observed or reopened.",
+            True,
+            "low",
+            "exposure",
+            {"protocols": ["tcp", "udp"]},
+        ),
+    ]
 
 
 def test_fresh_up_down_and_repeat_execution() -> None:
@@ -85,23 +135,18 @@ def test_fresh_up_down_and_repeat_execution() -> None:
             """
         ).fetchone()[0]
 
-        assert migrator.up() == ["000001", "000002", "000003", "000004", "000005"]
+        assert migrator.up() == ["000001"]
         assert migrator.up() == []
         rows = connection.execute(
-            "SELECT version, checksum FROM public.schema_migrations ORDER BY version"
+            "SELECT version, name, checksum FROM public.schema_migrations ORDER BY version"
         ).fetchall()
-        assert [row[0] for row in rows] == [
-            "000001",
-            "000002",
-            "000003",
-            "000004",
-            "000005",
-        ]
-        assert [row[1].strip() for row in rows] == [migration.checksum for migration in migrations]
+        assert [(row[0], row[1]) for row in rows] == [("000001", "core")]
+        assert [row[2].strip() for row in rows] == [migration.checksum for migration in migrations]
         assert (
             connection.execute("SELECT to_regclass('act.current_findings')").fetchone()[0]
             == "act.current_findings"
         )
+        _assert_seeded_detection_rules(connection)
         connection.execute(
             """
             UPDATE act.detection_rules
@@ -254,25 +299,6 @@ def test_fresh_up_down_and_repeat_execution() -> None:
                 """
             ).fetchone()[0]
 
-            assert migrator.down(target="000004", steps=None) == ["000005"]
-            assert _has_direct_connect(connection, "act_runtime_test")
-            assert connection.execute(
-                """
-                SELECT has_database_privilege(
-                    'act_runtime_test',
-                    current_database(),
-                    'CONNECT'
-                )
-                """
-            ).fetchone()[0]
-
-            _assert_direct_rollback_revokes_managed_connect(
-                connection,
-                migrator,
-                public_connect_baseline=public_connect_baseline,
-            )
-
-            assert migrator.up() == ["000004", "000005"]
             provision_application_credentials(
                 connection,
                 secrets,
@@ -287,20 +313,32 @@ def test_fresh_up_down_and_repeat_execution() -> None:
                 application_username="act_runtime_test",
                 password_factory=lambda: pytest.fail("password must not be regenerated"),
             )
+            _assert_baseline_rollback(
+                connection,
+                migrator,
+                public_connect_baseline=public_connect_baseline,
+            )
         finally:
-            connection.execute("SELECT act.revoke_application_role('act_runtime_test')")
+            revoke_function_exists = connection.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_catalog.pg_proc AS procedure
+                    JOIN pg_catalog.pg_namespace AS namespace
+                      ON namespace.oid = procedure.pronamespace
+                    WHERE namespace.nspname = 'act'
+                      AND procedure.proname = 'revoke_application_role'
+                )
+                """
+            ).fetchone()[0]
+            if revoke_function_exists:
+                connection.execute("SELECT act.revoke_application_role('act_runtime_test')")
+            migrator.down(target="000000", steps=None)
+            role_exists = connection.execute(
+                "SELECT 1 FROM pg_catalog.pg_roles WHERE rolname = 'act_runtime_test'"
+            ).fetchone()
+            if role_exists is not None:
+                connection.execute("DROP OWNED BY act_runtime_test")
+                connection.execute("DROP ROLE act_runtime_test")
 
-        assert migrator.down(target="000000", steps=None) == [
-            "000005",
-            "000004",
-            "000003",
-            "000002",
-            "000001",
-        ]
-        assert connection.execute("SELECT to_regnamespace('act')").fetchone()[0] is None
-        assert connection.execute(
-            "SELECT rolcanlogin FROM pg_catalog.pg_roles WHERE rolname = 'act_runtime_test'"
-        ).fetchone() == (True,)
-        connection.execute("DROP OWNED BY act_runtime_test")
-        connection.execute("DROP ROLE act_runtime_test")
         assert migrator.down(target="000000", steps=None) == []

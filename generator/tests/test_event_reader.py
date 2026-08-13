@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import sys
-import types
 import unittest
 from datetime import timedelta
 
@@ -12,7 +10,6 @@ from portscanner_generator.event_reader import (
     MutableS3Object,
     UnexpectedS3Object,
     decode_sqs_s3_record,
-    parse_shared_contract,
     read_target_event,
 )
 from portscanner_generator.handler import GeneratorServices, lambda_handler
@@ -38,6 +35,7 @@ def config(**overrides: object) -> GeneratorConfig:
         "cluster_name": "scanner-cluster",
         "namespace": "scanner-system",
         "aws_region": "us-east-1",
+        "authorized_account_ids": ("123456789012",),
     }
     values.update(overrides)
     return GeneratorConfig(**values)  # type: ignore[arg-type]
@@ -118,83 +116,6 @@ class EventReaderTests(unittest.TestCase):
                 sqs_record(event_document(), etag=None),
                 config(),
             )
-
-    def test_shared_contract_receives_complete_document(self) -> None:
-        captured: list[dict[str, object]] = []
-
-        class SharedTargetEvent:
-            @classmethod
-            def from_dict(cls, value: dict[str, object]) -> object:
-                captured.append(value)
-                return object()
-
-        module = types.ModuleType("portscanner_contracts")
-        module.TargetEvent = SharedTargetEvent  # type: ignore[attr-defined]
-        document = event_document()
-        original = sys.modules.get("portscanner_contracts")
-        sys.modules["portscanner_contracts"] = module
-        try:
-            parse_shared_contract(document)
-        finally:
-            if original is None:
-                sys.modules.pop("portscanner_contracts", None)
-            else:
-                sys.modules["portscanner_contracts"] = original
-
-        self.assertEqual(captured, [document])
-        self.assertIn("provider_metadata", captured[0])
-        self.assertIn("policy", captured[0])
-
-    def test_shared_parse_target_event_is_preferred_when_available(self) -> None:
-        captured: list[dict[str, object]] = []
-        sentinel = object()
-
-        module = types.ModuleType("portscanner_contracts")
-
-        def parse_target_event(value: dict[str, object]) -> object:
-            captured.append(value)
-            return sentinel
-
-        class LegacyTargetEvent:
-            @classmethod
-            def model_validate(cls, _: object) -> object:
-                raise AssertionError("legacy parser must not be used")
-
-        module.parse_target_event = parse_target_event  # type: ignore[attr-defined]
-        module.TargetEvent = LegacyTargetEvent  # type: ignore[attr-defined]
-        document = event_document()
-        original = sys.modules.get("portscanner_contracts")
-        sys.modules["portscanner_contracts"] = module
-        try:
-            parsed = parse_shared_contract(document)
-        finally:
-            if original is None:
-                sys.modules.pop("portscanner_contracts", None)
-            else:
-                sys.modules["portscanner_contracts"] = original
-
-        self.assertIs(parsed, sentinel)
-        self.assertEqual(captured, [document])
-
-    def test_removal_tombstone_is_owned_by_shared_event_parser(self) -> None:
-        document = {"event_type": "target.removed", "event_id": "removal-event-hash"}
-        expected = types.SimpleNamespace(
-            event_type="target.removed",
-            event_id="removal-event-hash",
-        )
-        module = types.ModuleType("portscanner_contracts")
-        module.parse_target_event = lambda value: expected  # type: ignore[attr-defined]
-        original = sys.modules.get("portscanner_contracts")
-        sys.modules["portscanner_contracts"] = module
-        try:
-            event = parse_shared_contract(document)
-        finally:
-            if original is None:
-                sys.modules.pop("portscanner_contracts", None)
-            else:
-                sys.modules["portscanner_contracts"] = original
-
-        self.assertIs(event, expected)
 
     def test_wrong_source_and_malformed_json_are_redriven(self) -> None:
         malformed = sqs_record("{not-json")
@@ -300,6 +221,7 @@ class EventReaderTests(unittest.TestCase):
             "EKS_CLUSTER_NAME": "scanner-cluster",
             "K8S_NAMESPACE": "scanner-system",
             "AWS_REGION": "us-east-1",
+            "AUTHORIZED_ACCOUNT_IDS": "222222222222,123456789012",
             "ALLOWED_TARGET_CIDRS": "203.0.113.0/24",
             "DENIED_TARGET_CIDRS": "203.0.113.10/32",
         }
@@ -308,9 +230,16 @@ class EventReaderTests(unittest.TestCase):
         self.assertTrue(settings.target_allowed("203.0.113.11"))
         self.assertFalse(settings.target_allowed("203.0.113.10"))
         self.assertFalse(settings.target_allowed("198.51.100.1"))
+        self.assertTrue(settings.account_allowed("123456789012"))
+        self.assertFalse(settings.account_allowed("000000000000"))
 
         environment["ALLOWED_TARGET_CIDRS"] = "203.0.113.10/24"
         with self.assertRaisesRegex(ConfigurationError, "canonical IPv4"):
+            GeneratorConfig.from_environment(environment)
+
+        environment["ALLOWED_TARGET_CIDRS"] = "203.0.113.0/24"
+        environment["AUTHORIZED_ACCOUNT_IDS"] = "not-an-account"
+        with self.assertRaisesRegex(ConfigurationError, "12-digit"):
             GeneratorConfig.from_environment(environment)
 
     def test_not_after_boundary_includes_later_time(self) -> None:

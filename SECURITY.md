@@ -7,9 +7,8 @@ SPDX-License-Identifier: MIT
 
 ## Supported versions
 
-The project is pre-1.0. Security fixes are provided on the default branch until the
-first versioned release. After releases begin, this section will list supported release
-lines explicitly.
+Security fixes are provided for the latest 1.x release and the default branch.
+Older release lines should be upgraded before reporting an issue.
 
 ## Report a vulnerability privately
 

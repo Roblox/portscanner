@@ -64,12 +64,6 @@ variable "collector_role_name" {
   }
 }
 
-variable "central_collector_principal_arn" {
-  description = "Optional snapshot-only central IAM role ARN retained for compatibility."
-  type        = string
-  default     = null
-}
-
 variable "central_collector_principal_arns" {
   description = "Exact central snapshot and signal IAM role ARNs trusted to assume the member collector role."
   type        = set(string)
@@ -183,15 +177,10 @@ locals {
     cloudtrail = "${var.name_prefix}-ec2-write-forward"
     state      = "${var.name_prefix}-ec2-state-forward"
   }
-  collector_principal_arns = setunion(
-    var.central_collector_principal_arns,
-    var.central_collector_principal_arn == null ? toset([]) : toset([
-      var.central_collector_principal_arn
-    ])
-  )
-  config_source_arn      = "arn:${data.aws_partition.current.partition}:config:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:*"
-  cloudtrail_name        = "${var.name_prefix}-management"
-  created_cloudtrail_arn = "arn:${data.aws_partition.current.partition}:cloudtrail:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:trail/${local.cloudtrail_name}"
+  collector_principal_arns = var.central_collector_principal_arns
+  config_source_arn        = "arn:${data.aws_partition.current.partition}:config:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:*"
+  cloudtrail_name          = "${var.name_prefix}-management"
+  created_cloudtrail_arn   = "arn:${data.aws_partition.current.partition}:cloudtrail:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:trail/${local.cloudtrail_name}"
   effective_cloudtrail_arn = (
     var.cloudtrail_mode == "create" ? local.created_cloudtrail_arn :
     var.cloudtrail_mode == "existing" ? var.existing_cloudtrail_arn :

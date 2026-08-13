@@ -5,8 +5,9 @@ TEST_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
 SCRIPT_DIR="$(CDPATH= cd -- "${TEST_DIR}/.." && pwd -P)"
 AWS_DIR="$(CDPATH= cd -- "${SCRIPT_DIR}/.." && pwd -P)"
 BUILD_SCRIPT="${SCRIPT_DIR}/build-images.sh"
-TF_ROOT="${AWS_DIR}/examples/created-vpc"
+TF_ROOT="${AWS_DIR}/deployment"
 APPLICATION_ROOT="${AWS_DIR}/application"
+DEPLOYMENT_ROOT="${AWS_DIR}/deployment"
 EXISTING_ROOT="${AWS_DIR}/examples/existing-vpc"
 CENTRAL_ROOT="${AWS_DIR}/examples/multi-account-central"
 MEMBER_ROOT="${AWS_DIR}/examples/member-account"
@@ -58,6 +59,12 @@ case "${output_name}" in
           "operator_installed":false,
           "dispatch_enabled":false,
           "automatic_inventory_enabled":false,
+          "periodic_snapshots_enabled":false,
+          "periodic_coverage_enabled":false,
+          "signal_hints_enabled":false,
+          "processor_reconciliation_enabled":false,
+          "finding_export_enabled":false,
+          "managed_canary_enabled":false,
           "canary_mode":false
         }'
         ;;
@@ -68,6 +75,12 @@ case "${output_name}" in
           "operator_installed":true,
           "dispatch_enabled":true,
           "automatic_inventory_enabled":true,
+          "periodic_snapshots_enabled":true,
+          "periodic_coverage_enabled":true,
+          "signal_hints_enabled":true,
+          "processor_reconciliation_enabled":true,
+          "finding_export_enabled":false,
+          "managed_canary_enabled":false,
           "canary_mode":false
         }'
         ;;
@@ -78,6 +91,12 @@ case "${output_name}" in
           "operator_installed":true,
           "dispatch_enabled":true,
           "automatic_inventory_enabled":false,
+          "periodic_snapshots_enabled":false,
+          "periodic_coverage_enabled":false,
+          "signal_hints_enabled":false,
+          "processor_reconciliation_enabled":false,
+          "finding_export_enabled":false,
+          "managed_canary_enabled":true,
           "canary_mode":true
         }'
         ;;
@@ -88,6 +107,12 @@ case "${output_name}" in
           "operator_installed":true,
           "dispatch_enabled":false,
           "automatic_inventory_enabled":false,
+          "periodic_snapshots_enabled":false,
+          "periodic_coverage_enabled":false,
+          "signal_hints_enabled":false,
+          "processor_reconciliation_enabled":false,
+          "finding_export_enabled":false,
+          "managed_canary_enabled":true,
           "canary_mode":true
         }'
         ;;
@@ -98,6 +123,12 @@ case "${output_name}" in
           "operator_installed":false,
           "dispatch_enabled":true,
           "automatic_inventory_enabled":false,
+          "periodic_snapshots_enabled":false,
+          "periodic_coverage_enabled":false,
+          "signal_hints_enabled":false,
+          "processor_reconciliation_enabled":false,
+          "finding_export_enabled":false,
+          "managed_canary_enabled":false,
           "canary_mode":true
         }'
         ;;
@@ -108,6 +139,12 @@ case "${output_name}" in
           "operator_installed":false,
           "dispatch_enabled":false,
           "automatic_inventory_enabled":false,
+          "periodic_snapshots_enabled":false,
+          "periodic_coverage_enabled":false,
+          "signal_hints_enabled":false,
+          "processor_reconciliation_enabled":false,
+          "finding_export_enabled":false,
+          "managed_canary_enabled":true,
           "canary_mode":true
         }'
         ;;
@@ -176,7 +213,7 @@ done
 [[ "${DRY_RUN_LOG}" == *"no AWS identity call, registry login, build, push, or digest output"* ]] ||
   fail "dry run did not state its side-effect boundary"
 
-for central_root in "${APPLICATION_ROOT}" "${EXISTING_ROOT}" "${CENTRAL_ROOT}"; do
+for central_root in "${APPLICATION_ROOT}" "${DEPLOYMENT_ROOT}" "${EXISTING_ROOT}" "${CENTRAL_ROOT}"; do
   PATH="${FAKE_BIN}:${PATH}" \
     PORTSCANNER_ALLOW_DIRTY=true \
     "${BUILD_SCRIPT}" --dry-run "${central_root}" arm64 >"${STDOUT_FILE}" 2>"${STDERR_FILE}" ||
@@ -241,7 +278,7 @@ MEMBER_ERROR="$(<"${STDERR_FILE}")"
   fail "member-account rejection was not explicit"
 
 if PATH="${FAKE_BIN}:${PATH}" PORTSCANNER_ALLOW_DIRTY=true \
-  "${BUILD_SCRIPT}" --dry-run "${TF_ROOT}/../created-vpc" arm64 >/dev/null 2>&1; then
+  "${BUILD_SCRIPT}" --dry-run "${TF_ROOT}/../deployment" arm64 >/dev/null 2>&1; then
   fail "root containing a traversal segment was accepted"
 fi
 

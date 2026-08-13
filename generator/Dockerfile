@@ -26,7 +26,7 @@ RUN python -m pip install --no-cache-dir --no-build-isolation --no-deps \
     && rm -rf /opt/build
 RUN python -m pip uninstall --yes hatchling setuptools trove-classifiers pathspec packaging pluggy
 
-COPY LICENSE NOTICE THIRD_PARTY_NOTICES.md /licenses/
+COPY LICENSE THIRD_PARTY_NOTICES.md /licenses/
 
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/python", "-m", "awslambdaric"]

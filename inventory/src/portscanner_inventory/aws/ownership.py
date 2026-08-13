@@ -27,10 +27,16 @@ class OwnershipValidator:
         client_factory: Any,
         *,
         allowed_tag_keys: Sequence[str] = (),
+        allowed_interface_types: Sequence[str] = (),
+        required_tag_key: str | None = None,
+        required_tag_value: str | None = None,
     ) -> None:
         self._state = state
         self._factory = client_factory
         self._allowed_tag_keys = tuple(allowed_tag_keys)
+        self._allowed_interface_types = tuple(allowed_interface_types)
+        self._required_tag_key = required_tag_key
+        self._required_tag_value = required_tag_value
 
     def _client(self, target: NormalizedTarget) -> Any:
         if hasattr(self._factory, "client"):
@@ -183,6 +189,9 @@ class OwnershipValidator:
                 security_groups=groups,
                 allowed_tag_keys=self._allowed_tag_keys,
                 instance_state=instance_state,
+                allowed_interface_types=self._allowed_interface_types,
+                required_tag_key=self._required_tag_key,
+                required_tag_value=self._required_tag_value,
             )
         except Exception as error:
             return OwnershipCheck(OwnershipVerdict.UNKNOWN, reason=aws_error_code(error))

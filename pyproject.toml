@@ -3,7 +3,7 @@
 
 [project]
 name = "portscanner-workspace"
-version = "0.1.0"
+version = "1.0.0"
 description = "Public monorepo tooling for the Portscanner project"
 requires-python = ">=3.12"
 dependencies = []
@@ -32,13 +32,11 @@ package = false
 members = [
     "contracts",
     "db/migrator",
-    "generator*",
-    "inventory*",
-    "parser*",
-    "processor*",
-    "packages/*",
+    "generator",
+    "inventory",
+    "parser",
+    "processor",
     "scanner/nmap",
-    "services/*",
 ]
 
 [tool.uv.sources]

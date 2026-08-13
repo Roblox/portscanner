@@ -185,14 +185,14 @@ class FakeOwnershipService:
     ) -> None:
         self.state = state
         self.current_generation = current_generation
-        self.calls: list[tuple[Any, int]] = []
+        self.calls: list[Any] = []
 
-    def revalidate(self, target: Any, generation: int) -> Any:
-        self.calls.append((target, generation))
+    def validate_event(self, event: Any) -> Any:
+        self.calls.append(event)
         return SimpleNamespace(
             verdict=self.state,
-            target_id=target.target_id,
-            requested_generation=generation,
+            target_id=event.target.target_id,
+            requested_generation=event.target.generation,
             current_generation=self.current_generation,
             reason="fixture",
         )

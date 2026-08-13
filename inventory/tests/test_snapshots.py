@@ -9,6 +9,7 @@ from portscanner_inventory.aws.config_snapshot import (
     ConfigSnapshotBackend,
 )
 from portscanner_inventory.aws.ec2_snapshot import Ec2SnapshotBackend
+from portscanner_inventory.aws.normalize import normalize_network_interface
 from portscanner_inventory.base import ScopeCompletion, SnapshotScope
 
 from .helpers import ACCOUNT_ID, ENI_ID, REGION, AwsError, eni, security_group
@@ -250,3 +251,96 @@ def test_scope_completion_is_authoritative_only_when_explicit() -> None:
     scope = SnapshotScope(source="ec2", account_id=ACCOUNT_ID, region=REGION)
     assert scope.includes(ACCOUNT_ID, REGION)
     assert not scope.includes(ACCOUNT_ID, "us-west-2")
+
+
+def test_snapshot_pagination_rejects_repeated_tokens_and_page_limits() -> None:
+    class RepeatedEc2:
+        def describe_security_groups(self, **_request: Any) -> dict[str, Any]:
+            return {"SecurityGroups": [], "NextToken": "repeat"}
+
+    ec2_fetch = Ec2SnapshotBackend(
+        RepeatedEc2(),
+        account_id=ACCOUNT_ID,
+        region=REGION,
+    )._fetch("describe_security_groups", "SecurityGroups")
+    assert ec2_fetch.failure_code == "pagination-token-repeated"
+    assert ec2_fetch.pages == 2
+
+    class EndlessConfig:
+        def select_aggregate_resource_config(self, **request: Any) -> dict[str, Any]:
+            token = request.get("NextToken")
+            return {"Results": [], "NextToken": "next-2" if token else "next-1"}
+
+    config_fetch = ConfigSnapshotBackend(
+        EndlessConfig(),
+        aggregator_name="example-aggregator",
+        max_pages=2,
+    ).fetch_records(NETWORK_INTERFACE_QUERY)
+    assert config_fetch.failure_code == "pagination-page-limit"
+    assert config_fetch.pages == 2
+
+    class RepeatedConfig:
+        def select_aggregate_resource_config(self, **_request: Any) -> dict[str, Any]:
+            return {"Results": [], "NextToken": "repeat"}
+
+    repeated_config_fetch = ConfigSnapshotBackend(
+        RepeatedConfig(),
+        aggregator_name="example-aggregator",
+    ).fetch_records(NETWORK_INTERFACE_QUERY)
+    assert repeated_config_fetch.failure_code == "pagination-token-repeated"
+    assert repeated_config_fetch.pages == 2
+
+
+def test_eni_class_and_opt_in_gate_is_configurable_without_breaking_disabled_mode() -> None:
+    interface = eni(
+        interface_type="interface",
+        tags=[{"Key": "service", "Value": "managed-canary"}],
+    )
+    groups = {"sg-11111111": security_group()["IpPermissions"]}
+
+    assert (
+        len(
+            normalize_network_interface(
+                interface,
+                account_id=ACCOUNT_ID,
+                region=REGION,
+                security_groups=groups,
+            )
+        )
+        == 1
+    )
+    assert (
+        len(
+            normalize_network_interface(
+                interface,
+                account_id=ACCOUNT_ID,
+                region=REGION,
+                security_groups=groups,
+                allowed_interface_types=("interface",),
+                required_tag_key="service",
+                required_tag_value="managed-canary",
+            )
+        )
+        == 1
+    )
+    assert (
+        normalize_network_interface(
+            interface,
+            account_id=ACCOUNT_ID,
+            region=REGION,
+            security_groups=groups,
+            allowed_interface_types=("efa",),
+        )
+        == ()
+    )
+    assert (
+        normalize_network_interface(
+            interface,
+            account_id=ACCOUNT_ID,
+            region=REGION,
+            security_groups=groups,
+            required_tag_key="service",
+            required_tag_value="different",
+        )
+        == ()
+    )

@@ -42,6 +42,7 @@ def config() -> GeneratorConfig:
         cluster_name="scanner-cluster",
         namespace="scanner-system",
         aws_region="us-east-1",
+        authorized_account_ids=("123456789012",),
     )
 
 
@@ -83,6 +84,7 @@ class DispatchTests(unittest.TestCase):
             namespace="scanner-system",
             aws_region="us-east-1",
             allowed_target_cidrs=(IPv4Network("198.51.100.0/24"),),
+            authorized_account_ids=("123456789012",),
         )
 
         response = lambda_handler(
@@ -100,9 +102,31 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(response, {"batchItemFailures": []})
         self.assertEqual(ownership.calls, [])
         self.assertEqual(scanner.created, [])
-        self.assertEqual(scanner.deleted, [exact_name])
-        self.assertEqual(claims.completed[0]["state"], ClaimState.CANCELLED)
-        self.assertEqual(claims.completed[0]["verdict"], "scope-denied")
+        self.assertEqual(scanner.deleted, [])
+        self.assertEqual(claims.acquired, [])
+        self.assertEqual(claims.completed, [])
+
+    def test_generator_denies_unauthorized_account_before_claim_or_target_apis(self) -> None:
+        document = event_document()
+        target = document["target"]
+        assert isinstance(target, dict)
+        target["scope_id"] = "222222222222"
+        scanner = FakeScannerClient()
+        claims = FakeClaimStore()
+        ownership = FakeOwnershipService("ACTIVE")
+
+        response = lambda_handler(
+            {"Records": [sqs_record(document)]},
+            None,
+            services=services_for(document, ownership, claims, scanner),
+        )
+
+        self.assertEqual(response, {"batchItemFailures": []})
+        self.assertEqual(claims.acquired, [])
+        self.assertEqual(claims.completed, [])
+        self.assertEqual(ownership.calls, [])
+        self.assertEqual(scanner.created, [])
+        self.assertEqual(scanner.deleted, [])
 
     def test_active_exact_generation_dispatches_after_cancelling_older(self) -> None:
         document = event_document()
@@ -287,7 +311,8 @@ class DispatchTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.states = iter(("UNKNOWN", "STALE"))
 
-            def revalidate(self, _target: object, generation: int) -> dict[str, object]:
+            def validate_event(self, event: object) -> dict[str, object]:
+                generation = event.target.generation  # type: ignore[attr-defined]
                 return {
                     "state": next(self.states),
                     "requested_generation": generation,
@@ -329,7 +354,8 @@ class DispatchTests(unittest.TestCase):
             def __init__(self) -> None:
                 self.states = iter(("ACTIVE", "MOVED"))
 
-            def revalidate(self, _target: object, generation: int) -> dict[str, object]:
+            def validate_event(self, event: object) -> dict[str, object]:
+                generation = event.target.generation  # type: ignore[attr-defined]
                 return {
                     "state": next(self.states),
                     "requested_generation": generation,

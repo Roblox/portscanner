@@ -101,6 +101,39 @@ variable "existing_private_interface_endpoint_security_group_ids" {
   default     = {}
 }
 
+variable "managed_canary_enabled" {
+  description = "Provision the isolated Terraform-owned TCP 18080 evaluation target. Advanced roots default to disabled."
+  type        = bool
+  default     = false
+}
+
+variable "managed_canary_vpc_cidr" {
+  description = "Dedicated unpeered managed-canary VPC /28."
+  type        = string
+  default     = "10.255.255.0/28"
+}
+
+variable "managed_canary_instance_type" {
+  description = "Tiny ARM EC2 instance type for the managed canary."
+  type        = string
+  default     = "t4g.nano"
+}
+
+variable "managed_canary_scanner_source_ipv4s" {
+  description = "Scanner egress EIPs for existing/TGW networking; created-VPC NAT EIPs are derived automatically."
+  type        = set(string)
+  default     = []
+
+  validation {
+    condition = alltrue([
+      for address in var.managed_canary_scanner_source_ipv4s :
+      can(cidrnetmask("${address}/32")) &&
+      try(cidrhost("${address}/32", 0) == address, false)
+    ])
+    error_message = "managed_canary_scanner_source_ipv4s must contain canonical IPv4 addresses."
+  }
+}
+
 variable "lambda_timeout_seconds" {
   description = "Timeout for queue-triggered Lambda functions."
   type        = number
@@ -319,6 +352,43 @@ variable "allowed_tag_keys" {
   }
 }
 
+variable "inventory_allowed_eni_interface_types" {
+  description = "Optional supported ENI classes. Empty disables the class gate for advanced-root compatibility."
+  type        = set(string)
+  default     = []
+
+  validation {
+    condition = alltrue([
+      for value in var.inventory_allowed_eni_interface_types :
+      can(regex("^[a-z0-9-]+$", value))
+    ])
+    error_message = "inventory_allowed_eni_interface_types must contain lowercase AWS ENI class names."
+  }
+}
+
+variable "inventory_required_target_tag_key" {
+  description = "Optional exact ENI opt-in tag key paired with inventory_required_target_tag_value."
+  type        = string
+  default     = null
+}
+
+variable "inventory_required_target_tag_value" {
+  description = "Optional exact ENI opt-in tag value paired with inventory_required_target_tag_key."
+  type        = string
+  default     = null
+}
+
+variable "snapshot_max_pages" {
+  description = "Hard per-operation page bound for EC2 and Config snapshots."
+  type        = number
+  default     = 1000
+
+  validation {
+    condition     = var.snapshot_max_pages >= 1 && var.snapshot_max_pages <= 10000
+    error_message = "snapshot_max_pages must be between 1 and 10000."
+  }
+}
+
 variable "cloudtrail_mode" {
   description = "create, existing, or disabled. Disabled retains native EC2 state hints but omits local API-call hints."
   type        = string
@@ -483,8 +553,32 @@ variable "enable_event_dispatch" {
   default     = false
 }
 
-variable "enable_automatic_inventory" {
-  description = "Enable recurring snapshots, rescans, processing repair, and EventBridge inventory hints. Requires enable_event_dispatch."
+variable "periodic_snapshots_enabled" {
+  description = "Enable authoritative periodic snapshots independently."
+  type        = bool
+  default     = false
+}
+
+variable "periodic_coverage_enabled" {
+  description = "Enable recurring full-TCP coverage independently."
+  type        = bool
+  default     = false
+}
+
+variable "signal_hints_enabled" {
+  description = "Enable EventBridge/CloudTrail signal intake independently."
+  type        = bool
+  default     = false
+}
+
+variable "processor_reconciliation_enabled" {
+  description = "Enable scheduled PostgreSQL finding reconciliation independently."
+  type        = bool
+  default     = false
+}
+
+variable "finding_export_enabled" {
+  description = "Create and publish optional S3/SQS finding handoffs. PostgreSQL is the default boundary."
   type        = bool
   default     = false
 }

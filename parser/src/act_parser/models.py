@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import ipaddress
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -33,11 +33,9 @@ def parse_address(value: Any, field: str = "address") -> str:
 
 
 def port_spec_bounds(spec: str) -> tuple[int | None, int | None]:
-    """Return inclusive numeric bounds; symbolic declarations remain non-closing."""
+    """Return inclusive numeric bounds for one canonical port declaration."""
     match = _PORT_SPEC.fullmatch(spec)
     if match is None:
-        if spec == "nmap-default":
-            return None, None
         raise ValueError("coverage port spec is invalid")
     start = int(match.group("start"))
     end = int(match.group("end") or start)
@@ -117,7 +115,7 @@ class ScanEnvelope:
     error_retryable: bool | None
     scan_started_at: datetime
     scan_completed_at: datetime
-    result_uploaded_at: datetime | None
+    result_uploaded_at: datetime
     coverage: tuple[CoverageDeclaration, ...]
     declared_open_tcp_ports: tuple[int, ...]
     raw_result: RawResultReference | None
@@ -145,16 +143,13 @@ class ScanEnvelope:
             )
 
         raw_coverage = payload["coverage"]
-        coverage_items: Sequence[Mapping[str, Any]]
-        coverage_items = [raw_coverage] if isinstance(raw_coverage, Mapping) else raw_coverage
+        if not isinstance(raw_coverage, Mapping):
+            raise ValueError("coverage must be one declaration")
         coverage = tuple(
-            declaration
-            for item in coverage_items
-            for declaration in CoverageDeclaration.from_mapping(item)
+            declaration for declaration in CoverageDeclaration.from_mapping(raw_coverage)
         )
 
         error = payload.get("error")
-        result_uploaded = timestamps.get("result_uploaded_at")
         return cls(
             attempt_id=str(payload["attempt_id"]),
             result_id=str(shared["result_id"]),
@@ -178,10 +173,8 @@ class ScanEnvelope:
             scan_completed_at=parse_timestamp(
                 timestamps["scan_completed_at"], "timestamps.scan_completed_at"
             ),
-            result_uploaded_at=(
-                None
-                if result_uploaded is None
-                else parse_timestamp(result_uploaded, "timestamps.result_uploaded_at")
+            result_uploaded_at=parse_timestamp(
+                timestamps["result_uploaded_at"], "timestamps.result_uploaded_at"
             ),
             coverage=coverage,
             declared_open_tcp_ports=tuple(int(port) for port in shared["open_tcp_ports"]),

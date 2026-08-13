@@ -94,6 +94,18 @@ variable "enable_config_delivery" {
   default     = false
 }
 
+variable "finding_export_enabled" {
+  description = "Create finding S3/SQS integration storage and notifications."
+  type        = bool
+  default     = true
+}
+
+variable "enable_cloudtrail_storage" {
+  description = "Create the CloudTrail bucket only for a trail managed by this stack."
+  type        = bool
+  default     = true
+}
+
 variable "signal_event_rule_arns" {
   description = "Exact EventBridge rule ARNs permitted to send to the central signal queue."
   type        = list(string)
@@ -144,8 +156,15 @@ data "aws_partition" "current" {}
 data "aws_region" "current" {}
 
 locals {
-  bucket_purposes   = toset(["events", "results", "findings", "cloudtrail"])
-  queue_purposes    = toset(["signal", "priority", "coverage", "target-event", "result", "finding"])
+  bucket_purposes = setunion(
+    toset(["events", "results"]),
+    var.finding_export_enabled ? toset(["findings"]) : toset([]),
+    var.enable_cloudtrail_storage ? toset(["cloudtrail"]) : toset([])
+  )
+  queue_purposes = setunion(
+    toset(["signal", "priority", "coverage", "target-event", "result"]),
+    var.finding_export_enabled ? toset(["finding"]) : toset([])
+  )
   config_source_arn = "arn:${data.aws_partition.current.partition}:config:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:*"
 }
 
@@ -160,7 +179,7 @@ resource "terraform_data" "storage_validation" {
 
     precondition {
       condition     = alltrue([for purpose in local.bucket_purposes : lookup(var.bucket_expiration_days, purpose, 0) > 0])
-      error_message = "bucket_expiration_days must contain a positive value for events, results, findings, and cloudtrail."
+      error_message = "bucket_expiration_days must contain a positive value for every enabled bucket."
     }
   }
 }
@@ -644,6 +663,8 @@ resource "aws_s3_bucket_notification" "results" {
 }
 
 resource "aws_s3_bucket_notification" "findings" {
+  count = var.finding_export_enabled ? 1 : 0
+
   bucket = aws_s3_bucket.data["findings"].id
 
   queue {
@@ -782,6 +803,26 @@ output "table_stream_arns" {
 
 output "bucket_policy_ids" {
   value = { for purpose, policy in aws_s3_bucket_policy.data : purpose => policy.id }
+}
+
+output "finding_bucket_name" {
+  value = try(aws_s3_bucket.data["findings"].id, null)
+}
+
+output "finding_bucket_arn" {
+  value = try(aws_s3_bucket.data["findings"].arn, null)
+}
+
+output "finding_queue_url" {
+  value = try(aws_sqs_queue.main["finding"].url, null)
+}
+
+output "finding_queue_arn" {
+  value = try(aws_sqs_queue.main["finding"].arn, null)
+}
+
+output "cloudtrail_bucket_name" {
+  value = try(aws_s3_bucket.data["cloudtrail"].id, null)
 }
 
 output "alarm_names" {

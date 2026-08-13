@@ -56,22 +56,22 @@ output "target_event_queue_url" {
 
 output "finding_queue_url" {
   description = "External finding handoff notification queue; no in-stack Lambda consumes it."
-  value       = module.storage.queue_urls["finding"]
+  value       = module.storage.finding_queue_url
 }
 
 output "finding_queue_arn" {
   description = "ARN of the external finding handoff queue for consumer IAM policies."
-  value       = module.storage.queue_arns["finding"]
+  value       = module.storage.finding_queue_arn
 }
 
 output "finding_bucket_name" {
   description = "Bucket containing immutable finding documents referenced by finding queue notifications."
-  value       = module.storage.bucket_names["findings"]
+  value       = module.storage.finding_bucket_name
 }
 
 output "finding_bucket_arn" {
   description = "ARN of the immutable finding bucket for consumer IAM policies."
-  value       = module.storage.bucket_arns["findings"]
+  value       = module.storage.finding_bucket_arn
 }
 
 output "repository_urls" {
@@ -127,6 +127,94 @@ output "function_arns" {
   value = module.functions.function_arns
 }
 
+output "managed_canary" {
+  description = "Terraform-owned target identity and lifecycle-relevant values. Null when disabled."
+  value = var.managed_canary_enabled ? {
+    account_id           = data.aws_caller_identity.current.account_id
+    region               = data.aws_region.current.region
+    vpc_id               = module.managed_canary[0].vpc_id
+    subnet_id            = module.managed_canary[0].subnet_id
+    security_group_id    = module.managed_canary[0].security_group_id
+    eip_allocation_id    = module.managed_canary[0].eip_allocation_id
+    public_ip            = module.managed_canary[0].public_ip
+    public_cidr          = module.managed_canary[0].public_cidr
+    network_interface_id = module.managed_canary[0].network_interface_id
+    private_ip           = module.managed_canary[0].private_ip
+    instance_id          = module.managed_canary[0].instance_id
+    instance_state       = module.managed_canary[0].instance_state
+    listener_port        = module.managed_canary[0].listener_port
+    inventory_tag_key    = module.managed_canary[0].inventory_tag_key
+    inventory_tag_value  = module.managed_canary[0].inventory_tag_value
+  } : null
+}
+
+output "managed_canary_eip_allocation_id" {
+  value = var.managed_canary_enabled ? module.managed_canary[0].eip_allocation_id : null
+}
+
+output "managed_canary_public_ip" {
+  value = var.managed_canary_enabled ? module.managed_canary[0].public_ip : null
+}
+
+output "managed_canary_public_cidr" {
+  value = var.managed_canary_enabled ? module.managed_canary[0].public_cidr : null
+}
+
+output "managed_canary_network_interface_id" {
+  value = var.managed_canary_enabled ? module.managed_canary[0].network_interface_id : null
+}
+
+output "managed_canary_instance_id" {
+  value = var.managed_canary_enabled ? module.managed_canary[0].instance_id : null
+}
+
+output "managed_canary_listener_port" {
+  value = var.managed_canary_enabled ? module.managed_canary[0].listener_port : null
+}
+
+output "managed_canary_snapshot_function_name" {
+  value = var.managed_canary_enabled ? module.functions.snapshot_function_name : null
+}
+
+output "managed_canary_snapshot_function_arn" {
+  value = var.managed_canary_enabled ? module.functions.snapshot_function_arn : null
+}
+
+output "managed_canary_status_function_name" {
+  value = var.managed_canary_enabled ? module.functions.processor_function_name : null
+}
+
+output "managed_canary_status_function_arn" {
+  value = var.managed_canary_enabled ? module.functions.processor_function_arn : null
+}
+
+output "managed_canary_snapshot_invocation" {
+  description = "Narrow payload and function used by deployment automation for the one-target inventory invocation."
+  value = var.managed_canary_enabled ? {
+    function_name = module.functions.snapshot_function_name
+    function_arn  = module.functions.snapshot_function_arn
+    payload = {
+      operation = "managed-canary"
+    }
+  } : null
+}
+
+output "managed_canary_status_invocation" {
+  description = "Narrow processor status operation for deployment automation."
+  value = var.managed_canary_enabled ? {
+    function_name = module.functions.processor_function_name
+    function_arn  = module.functions.processor_function_arn
+    payload = {
+      operation = "managed-canary-status"
+    }
+  } : null
+}
+
+output "operator_namespace" {
+  description = "Namespace containing the Helm release and scanner Jobs."
+  value       = var.eks_namespace
+}
+
 output "emergency_pause_controls" {
   description = "Exact AWS-side dispatch controls used by emergency-pause.sh without refreshing Helm or EKS."
   value = {
@@ -171,12 +259,23 @@ output "central_collector_principal_arns" {
 
 output "deployment_state" {
   value = {
-    runtime_created             = var.deploy_runtime
-    migration_run               = var.run_migration
-    operator_installed          = var.install_operator
-    dispatch_enabled            = var.enable_event_dispatch
-    automatic_inventory_enabled = var.enable_automatic_inventory
-    canary_mode                 = var.canary_mode
+    runtime_created    = var.deploy_runtime
+    migration_run      = var.run_migration
+    operator_installed = var.install_operator
+    dispatch_enabled   = var.enable_event_dispatch
+    automatic_inventory_enabled = (
+      local.periodic_snapshots_enabled ||
+      local.periodic_coverage_enabled ||
+      local.signal_hints_enabled ||
+      local.processor_reconciliation_enabled
+    )
+    periodic_snapshots_enabled       = local.periodic_snapshots_enabled
+    periodic_coverage_enabled        = local.periodic_coverage_enabled
+    signal_hints_enabled             = local.signal_hints_enabled
+    processor_reconciliation_enabled = local.processor_reconciliation_enabled
+    finding_export_enabled           = var.finding_export_enabled
+    managed_canary_enabled           = var.managed_canary_enabled
+    canary_mode                      = var.canary_mode
   }
 }
 

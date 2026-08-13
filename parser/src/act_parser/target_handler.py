@@ -413,8 +413,13 @@ def _process_target_event(
     try:
         with psycopg.connect(settings.database_dsn) as connection:
             repository = Repository(connection)
-            repository.apply_target_event(event, finding_bucket=settings.finding_bucket)
-            _publish_target_event_handoffs(s3, repository, event.event_id)
+            repository.apply_target_event(
+                event,
+                finding_bucket=settings.finding_bucket,
+                queue_finding_handoffs=settings.finding_export_enabled,
+            )
+            if settings.finding_export_enabled:
+                _publish_target_event_handoffs(s3, repository, event.event_id)
     except RuleConfigurationError as error:
         raise RetryableRecordError("editable detection rule configuration is invalid") from error
     except DataInvariantError as error:

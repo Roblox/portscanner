@@ -13,6 +13,23 @@ def _write_pair(root: Path, version: str, name: str, up: str, down: str) -> None
     (root / f"{version}_{name}.down.sql").write_text(down, encoding="utf-8")
 
 
+def test_repository_migration_artifact_is_one_baseline_pair() -> None:
+    migrations_path = Path(__file__).resolve().parents[2] / "migrations"
+
+    migrations = discover_migrations(migrations_path)
+
+    assert [(migration.version, migration.name) for migration in migrations] == [("000001", "core")]
+    checksums = [migration.checksum for migration in migrations]
+    checksums.append(migration_set_checksum(migrations_path))
+    assert all(
+        len(checksum) == 64 and set(checksum) <= set("0123456789abcdef") for checksum in checksums
+    )
+    assert sorted(path.name for path in migrations_path.iterdir()) == [
+        "000001_core.down.sql",
+        "000001_core.up.sql",
+    ]
+
+
 def test_discovers_ordered_pairs_and_hashes_both_directions(tmp_path: Path) -> None:
     _write_pair(tmp_path, "000002", "second", "SELECT 2;", "SELECT -2;")
     _write_pair(tmp_path, "000001", "first", "SELECT 1;", "SELECT -1;")

@@ -1,5 +1,5 @@
-// Copyright 2026 Roblox Corporation
-// SPDX-License-Identifier: Apache-2.0
+// SPDX-FileCopyrightText: 2026 Portscanner contributors
+// SPDX-License-Identifier: MIT
 
 package controller
 
@@ -295,12 +295,9 @@ func scannerArguments(spec scanningv1alpha1.ScannerSpec) ([]string, error) {
 		"--tcp-ports=" + coverage,
 	}
 	switch spec.Profile {
-	case scanningv1alpha1.ProfileFastFullTCP:
-		args = append(args, "--scan-mode=fast")
-	case scanningv1alpha1.ProfileTargetedTCP:
-		args = append(args, "--scan-mode=targeted")
-	case scanningv1alpha1.ProfileDeep:
-		args = append(args, "--scan-mode=deep", "--service-detection")
+	case scanningv1alpha1.ProfileFastFullTCP,
+		scanningv1alpha1.ProfileTargetedTCP,
+		scanningv1alpha1.ProfileDeep:
 	default:
 		return nil, fmt.Errorf("unsupported scan profile %q", spec.Profile)
 	}

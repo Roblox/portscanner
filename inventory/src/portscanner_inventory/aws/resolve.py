@@ -30,11 +30,21 @@ class Ec2Resolver:
         client_factory: Any,
         *,
         allowed_tag_keys: Sequence[str] = (),
+        allowed_interface_types: Sequence[str] = (),
+        required_tag_key: str | None = None,
+        required_tag_value: str | None = None,
         page_size: int = 500,
+        max_pages: int = 1000,
     ) -> None:
         self._factory = client_factory
         self._allowed_tag_keys = tuple(allowed_tag_keys)
+        self._allowed_interface_types = tuple(allowed_interface_types)
+        self._required_tag_key = required_tag_key
+        self._required_tag_value = required_tag_value
         self._page_size = page_size
+        self._max_pages = max_pages
+        if not 1 <= max_pages <= 10_000:
+            raise ValueError("EC2 resolver max_pages must be within 1..10000")
 
     def _client(self, hint: SignalHint) -> Any:
         if hasattr(self._factory, "client"):
@@ -53,6 +63,8 @@ class Ec2Resolver:
     ) -> tuple[Mapping[str, Any], ...]:
         values: list[Mapping[str, Any]] = []
         token: str | None = None
+        seen_tokens: set[str] = set()
+        pages = 0
         while True:
             request: dict[str, Any] = {
                 "Filters": list(filters),
@@ -61,13 +73,20 @@ class Ec2Resolver:
             if token:
                 request["NextToken"] = token
             response = client.describe_network_interfaces(**request)
+            pages += 1
             values.extend(
                 item for item in response.get("NetworkInterfaces", ()) if isinstance(item, Mapping)
             )
             next_token = response.get("NextToken")
             if not next_token:
                 return tuple(values)
-            token = str(next_token)
+            next_value = str(next_token)
+            if next_value in seen_tokens:
+                raise ValueError("EC2 pagination token repeated")
+            if pages >= self._max_pages:
+                raise ValueError("EC2 pagination page limit exceeded")
+            seen_tokens.add(next_value)
+            token = next_value
 
     def _read_eni_ids(
         self,
@@ -267,6 +286,9 @@ class Ec2Resolver:
                     security_groups=groups,
                     allowed_tag_keys=self._allowed_tag_keys,
                     instance_state=instance_states.get(instance_id or ""),
+                    allowed_interface_types=self._allowed_interface_types,
+                    required_tag_key=self._required_tag_key,
+                    required_tag_value=self._required_tag_value,
                 ):
                     signaled = target.with_signal(
                         event_name=hint.event_name,

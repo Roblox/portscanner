@@ -138,8 +138,7 @@ def _config_observation_order(
     return _ObservationOrder.NOT_NEWER
 
 
-def _observation_version(target: NormalizedTarget, fallback: datetime) -> str:
-    del fallback
+def _observation_version(target: NormalizedTarget) -> str:
     eni_version, group_versions = _component_versions(target)
     return deterministic_sha256(
         "portscanner.inventory.observation-version.v1",
@@ -231,7 +230,7 @@ class DynamoStateStore:
             "public_ip": _s(state.target.public_ip),
             "contract_target_id": _s(state.contract_target_id or ""),
             "observed_at": _s(_timestamp(observed_at)),
-            "observation_version": _s(_observation_version(state.target, observed_at)),
+            "observation_version": _s(_observation_version(state.target)),
             "updated_at": _s(_timestamp(updated_at)),
         }
 
@@ -268,22 +267,19 @@ class DynamoStateStore:
         ):
             raise ValueError("invalid target state item")
         target = NormalizedTarget.from_state_dict(json.loads(target_json))
-        raw_observed_at = (
-            _attribute(item, "observed_at")
-            or (_timestamp(target.observed_at) if target.observed_at is not None else None)
-            or _attribute(item, "updated_at")
-        )
+        raw_observed_at = _attribute(item, "observed_at")
+        signature = _attribute(item, "signature")
         if raw_observed_at is None:
             raise ValueError("target state item has no observation time")
+        if signature is None:
+            raise ValueError("target state item has no signature")
         observed_at = _parse_timestamp(raw_observed_at)
-        if target.observed_at is None:
-            target = target.with_observation(observed_at)
         return TargetState(
             target_id=pk.removeprefix("TARGET#"),
             generation=int(generation),
             status=status,
             target=target,
-            signature=_attribute(item, "signature") or target.state_signature,
+            signature=signature,
             contract_target_id=_attribute(item, "contract_target_id") or None,
             observed_at=observed_at,
         )
@@ -369,10 +365,8 @@ class DynamoStateStore:
                 raise ValueError("previous target state has no observation time")
             condition = (
                 "#generation = :expected AND #status = :status "
-                "AND (attribute_not_exists(#observed_at) "
-                "OR #observed_at = :expected_observed_at) "
-                "AND (attribute_not_exists(#observation_version) "
-                "OR #observation_version = :expected_observation_version)"
+                "AND #observed_at = :expected_observed_at "
+                "AND #observation_version = :expected_observation_version"
             )
             names = {
                 "#generation": "generation",
@@ -384,9 +378,7 @@ class DynamoStateStore:
                 ":expected": _n(previous.generation),
                 ":status": _s(previous.status),
                 ":expected_observed_at": _s(_timestamp(previous.observed_at)),
-                ":expected_observation_version": _s(
-                    _observation_version(previous.target, previous.observed_at)
-                ),
+                ":expected_observation_version": _s(_observation_version(previous.target)),
             }
         put_state: dict[str, Any] = {
             "TableName": self._table_name,
@@ -424,10 +416,8 @@ class DynamoStateStore:
                         "Item": self._state_item(state, updated_at=now),
                         "ConditionExpression": (
                             "#generation = :expected AND #status = :status "
-                            "AND (attribute_not_exists(#observed_at) "
-                            "OR #observed_at = :expected_observed_at) "
-                            "AND (attribute_not_exists(#observation_version) "
-                            "OR #observation_version = :expected_observation_version)"
+                            "AND #observed_at = :expected_observed_at "
+                            "AND #observation_version = :expected_observation_version"
                         ),
                         "ExpressionAttributeNames": {
                             "#generation": "generation",
@@ -440,10 +430,7 @@ class DynamoStateStore:
                             ":status": _s(previous.status),
                             ":expected_observed_at": _s(_timestamp(previous.observed_at)),
                             ":expected_observation_version": _s(
-                                _observation_version(
-                                    previous.target,
-                                    previous.observed_at,
-                                )
+                                _observation_version(previous.target)
                             ),
                         },
                     }

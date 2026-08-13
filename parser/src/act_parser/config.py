@@ -23,8 +23,9 @@ class ConfigurationError(RuntimeError):
 class Settings:
     scan_result_bucket: str
     raw_result_bucket: str
-    finding_bucket: str
+    finding_bucket: str | None
     database_dsn: str
+    finding_export_enabled: bool = True
     max_envelope_bytes: int = 1_048_576
     max_xml_bytes: int = 67_108_864
 
@@ -33,8 +34,9 @@ class Settings:
 class TargetEventSettings:
     target_event_bucket: str
     target_event_prefix: str
-    finding_bucket: str
+    finding_bucket: str | None
     database_dsn: str
+    finding_export_enabled: bool = True
     max_event_bytes: int = 65_536
 
 
@@ -105,38 +107,55 @@ def database_dsn() -> str:
     return _database_dsn()
 
 
+def _finding_export_enabled() -> bool:
+    raw = os.getenv("FINDING_EXPORT_ENABLED")
+    if raw is None:
+        return True
+    if raw.lower() not in {"true", "false"}:
+        raise ConfigurationError("FINDING_EXPORT_ENABLED must be true or false")
+    return raw.lower() == "true"
+
+
 def load_settings() -> Settings:
+    finding_export_enabled = _finding_export_enabled()
     buckets = {
         "scan_result_bucket": os.getenv("SCAN_RESULT_BUCKET"),
         "raw_result_bucket": os.getenv("RAW_RESULT_BUCKET"),
-        "finding_bucket": os.getenv("FINDING_BUCKET"),
     }
     missing = [key for key, value in buckets.items() if not value]
+    finding_bucket = os.getenv("FINDING_BUCKET")
+    if finding_export_enabled and not finding_bucket:
+        missing.append("finding_bucket")
     if missing:
         raise ConfigurationError(f"missing bucket settings: {', '.join(sorted(missing))}")
     return Settings(
         scan_result_bucket=buckets["scan_result_bucket"] or "",
         raw_result_bucket=buckets["raw_result_bucket"] or "",
-        finding_bucket=buckets["finding_bucket"] or "",
+        finding_bucket=finding_bucket,
         database_dsn=database_dsn(),
+        finding_export_enabled=finding_export_enabled,
         max_envelope_bytes=int(os.getenv("MAX_SCAN_RESULT_ENVELOPE_BYTES", "1048576")),
         max_xml_bytes=int(os.getenv("MAX_RAW_XML_BYTES", "67108864")),
     )
 
 
 def load_target_event_settings() -> TargetEventSettings:
+    finding_export_enabled = _finding_export_enabled()
     values = {
         "target_event_bucket": os.getenv("TARGET_EVENT_BUCKET"),
         "target_event_prefix": os.getenv("TARGET_EVENT_PREFIX"),
-        "finding_bucket": os.getenv("FINDING_BUCKET"),
     }
     missing = [key for key, value in values.items() if not value]
+    finding_bucket = os.getenv("FINDING_BUCKET")
+    if finding_export_enabled and not finding_bucket:
+        missing.append("finding_bucket")
     if missing:
         raise ConfigurationError(f"missing target event settings: {', '.join(sorted(missing))}")
     return TargetEventSettings(
         target_event_bucket=values["target_event_bucket"] or "",
         target_event_prefix=values["target_event_prefix"] or "",
-        finding_bucket=values["finding_bucket"] or "",
+        finding_bucket=finding_bucket,
         database_dsn=database_dsn(),
+        finding_export_enabled=finding_export_enabled,
         max_event_bytes=int(os.getenv("MAX_TARGET_EVENT_BYTES", "65536")),
     )

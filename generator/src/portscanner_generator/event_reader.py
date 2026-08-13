@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-import importlib
 import json
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import unquote_plus
+
+from portscanner_contracts import parse_target_event
 
 from .config import GeneratorConfig
 
@@ -165,31 +166,8 @@ def _load_json_document(content: bytes) -> Mapping[str, Any]:
 def parse_shared_contract(document: Mapping[str, Any]) -> Any:
     """Parse all fields through the sibling shared contract package."""
 
-    module = importlib.import_module("portscanner_contracts")
-    shared_parser = getattr(module, "parse_target_event", None)
-    if callable(shared_parser):
-        try:
-            return shared_parser(document)
-        except (KeyError, TypeError, ValueError) as error:
-            raise MalformedTargetEvent("TargetEvent failed shared contract validation") from error
-
-    # Compatibility for released contract packages and isolated tests that
-    # predate parse_target_event(). New contract packages own the complete
-    # event union, including removal tombstones.
-    target_event_type = getattr(module, "TargetEvent", None)
-    if target_event_type is None:
-        models = importlib.import_module("portscanner_contracts.models")
-        target_event_type = getattr(models, "TargetEvent", None)
-    if target_event_type is None:
-        raise RuntimeError("portscanner_contracts does not export TargetEvent")
-
-    parser = getattr(target_event_type, "from_dict", None)
-    if parser is None:
-        parser = getattr(target_event_type, "model_validate", None)
-    if not callable(parser):
-        raise RuntimeError("portscanner_contracts.TargetEvent has no supported parser")
     try:
-        return parser(document)
+        return parse_target_event(document)
     except (KeyError, TypeError, ValueError) as error:
         raise MalformedTargetEvent("TargetEvent failed shared contract validation") from error
 

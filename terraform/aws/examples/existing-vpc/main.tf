@@ -285,16 +285,19 @@ module "portscanner" {
   scanner_min_rate                   = var.scanner_min_rate
   scanner_max_rate                   = var.scanner_max_rate
 
-  deploy_runtime             = var.deploy_runtime
-  run_migration              = var.run_migration
-  install_operator           = var.install_operator
-  enable_event_dispatch      = var.enable_event_dispatch
-  enable_automatic_inventory = var.enable_automatic_inventory
-  canary_mode                = var.canary_mode
-  image_digests              = var.image_digests
-  migration_checksum         = var.migration_checksum
-  alarm_action_arns          = []
-  ok_action_arns             = []
+  deploy_runtime                   = var.deploy_runtime
+  run_migration                    = var.run_migration
+  install_operator                 = var.install_operator
+  enable_event_dispatch            = var.enable_event_dispatch
+  periodic_snapshots_enabled       = var.enable_automatic_inventory
+  periodic_coverage_enabled        = var.enable_automatic_inventory
+  signal_hints_enabled             = var.enable_automatic_inventory
+  processor_reconciliation_enabled = var.enable_automatic_inventory
+  canary_mode                      = var.canary_mode
+  image_digests                    = var.image_digests
+  migration_checksum               = var.migration_checksum
+  alarm_action_arns                = []
+  ok_action_arns                   = []
 
   eks_api_client_security_group_ids = var.eks_api_client_security_group_ids
   eks_endpoint_public_access        = var.eks_endpoint_public_access

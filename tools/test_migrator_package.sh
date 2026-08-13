@@ -81,7 +81,7 @@ source_files = {path.name: path.read_bytes() for path in source_entries}
 packaged_files = {path.name: path.read_bytes() for path in packaged_entries}
 assert packaged_files == source_files
 assert migration_set_checksum(packaged) == migration_set_checksum(repository)
-assert len(discover_migrations(packaged)) == 5
+assert len(discover_migrations(packaged)) == 1
 PY
   "${WORK_DIR}/venv/bin/act-migrate" --help >/dev/null
 )

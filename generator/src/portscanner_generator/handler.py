@@ -164,6 +164,18 @@ def _reason(event: Any) -> str:
     return _enum_text(event.scan.reason)
 
 
+def _target_scope(event: Any) -> tuple[str, str]:
+    target = event.target
+    account_id = getattr(target, "scope_id", None)
+    address = getattr(target, "public_address", None)
+    if account_id is None:
+        context = getattr(event, "aws_context", None)
+        account_id = getattr(context, "account_id", None)
+    if not isinstance(account_id, str) or not isinstance(address, str):
+        raise ValueError("target event has no account/address scope")
+    return account_id, address
+
+
 def _retry_claim(
     services: GeneratorServices,
     claim: EventClaim,
@@ -275,6 +287,29 @@ def process_sqs_record(
     is_removal = _event_type(event) == "target.removed"
     deadline_at = None if is_removal else _event_time(event.scan.deadline_at, "scan.deadline_at")
     not_after = None if is_removal else _event_time(event.scan.not_after, "scan.not_after")
+    account_id, public_address = _target_scope(event)
+
+    if not services.config.account_allowed(account_id) or not services.config.target_allowed(
+        public_address
+    ):
+        _log(
+            logging.WARNING,
+            "event_rejected",
+            event_hash=event_hash,
+            trace_hash=trace_hash,
+            target_hash=opaque_target_hash,
+            generation=event.target.generation,
+            verdict="scope-denied",
+            outcome="scope_denied",
+            cancelled=0,
+        )
+        return RecordOutcome(
+            "scope_denied",
+            event_hash,
+            trace_hash,
+            "scope-denied",
+            0,
+        )
 
     try:
         claim_result = services.claim_store.acquire(
@@ -317,47 +352,6 @@ def process_sqs_record(
             "claim_missing",
             event_hash=event_hash,
             trace_hash=trace_hash,
-        )
-
-    if not is_removal and not services.config.target_allowed(str(event.target.public_address)):
-        try:
-            exact_deleted = cancel_event_scanner(
-                services.scanner_client(),
-                event_id=event.event_id,
-            )
-            services.claim_store.complete(
-                claim,
-                state=ClaimState.CANCELLED,
-                now=services.clock(),
-                verdict="scope-denied",
-                scanner_name=scanner_name(event.event_id),
-                cancelled_count=int(exact_deleted),
-            )
-        except Exception as error:
-            _retry_claim(services, claim, error_code="scope_denial_failed")
-            raise RetryableRecordError(
-                "scope_denial_failed",
-                event_hash=event_hash,
-                trace_hash=trace_hash,
-                verdict="scope-denied",
-            ) from error
-        _log(
-            logging.WARNING,
-            "event_rejected",
-            event_hash=event_hash,
-            trace_hash=trace_hash,
-            target_hash=opaque_target_hash,
-            generation=event.target.generation,
-            verdict="scope-denied",
-            outcome="scope_denied",
-            cancelled=int(exact_deleted),
-        )
-        return RecordOutcome(
-            "scope_denied",
-            event_hash,
-            trace_hash,
-            "scope-denied",
-            int(exact_deleted),
         )
 
     try:

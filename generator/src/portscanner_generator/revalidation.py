@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import importlib
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, Protocol, TypeGuard, cast
+from typing import Any, Protocol
 
 
 class OwnershipDecision(StrEnum):
@@ -26,23 +25,9 @@ class OwnershipCheck:
     reason: str | None = None
 
 
-class EventOwnershipService(Protocol):
+class OwnershipService(Protocol):
     def validate_event(self, event: Any) -> Any:
         """Return a verdict for a complete shared event."""
-
-
-class TargetOwnershipService(Protocol):
-    def revalidate(self, target: Any, generation: int) -> Any:
-        """Return ACTIVE, STALE, MOVED, INACTIVE, or UNKNOWN."""
-
-
-type OwnershipService = EventOwnershipService | TargetOwnershipService
-
-
-def _is_ownership_service(value: object) -> TypeGuard[OwnershipService]:
-    return callable(getattr(value, "validate_event", None)) or callable(
-        getattr(value, "revalidate", None)
-    )
 
 
 def _field(verdict: Any, name: str, default: Any = None) -> Any:
@@ -111,12 +96,7 @@ def revalidate_event(
     event: Any,
 ) -> OwnershipCheck:
     generation = event.target.generation
-    validate_event = getattr(service, "validate_event", None)
-    if callable(validate_event):
-        raw_verdict = validate_event(event)
-    else:
-        target_service = cast(TargetOwnershipService, service)
-        raw_verdict = target_service.revalidate(event.target, generation)
+    raw_verdict = service.validate_event(event)
     return classify_verdict(raw_verdict, generation)
 
 
@@ -126,37 +106,14 @@ def ownership_service_from_environment(
     state_table: str | None = None,
     environment: Mapping[str, str] | None = None,
 ) -> OwnershipService:
-    """Load the sibling inventory package's environment-backed service."""
+    """Build the inventory package's AWS ownership validator."""
 
     env = environment if environment is not None else os.environ
-    module = importlib.import_module("portscanner_inventory")
-    candidate: object
-    for factory_name in (
-        "ownership_service_from_environment",
-        "create_ownership_service",
-        "build_ownership_service",
-    ):
-        factory = getattr(module, factory_name, None)
-        if callable(factory):
-            candidate = factory()
-            if not _is_ownership_service(candidate):
-                raise RuntimeError("inventory ownership service has no validation method")
-            return candidate
-
-    service_type = getattr(module, "OwnershipService", None)
-    from_environment = getattr(service_type, "from_environment", None)
-    if callable(from_environment):
-        candidate = from_environment()
-        if _is_ownership_service(candidate):
-            return candidate
-
-    # The current inventory package exposes its AWS validator and safe client
-    # factory as composable services rather than a top-level factory.
     from portscanner_inventory.aws.ownership import OwnershipValidator
     from portscanner_inventory.aws.session import AwsClientFactory
     from portscanner_inventory.state import DynamoStateStore
 
-    table_name = state_table or env.get("INVENTORY_TABLE") or env.get("TARGET_TABLE_NAME")
+    table_name = state_table or env.get("INVENTORY_TABLE")
     if not table_name:
         raise RuntimeError("inventory ownership state table is not configured")
     if session is None:
@@ -175,8 +132,20 @@ def ownership_service_from_environment(
             {value.strip() for value in env.get("ALLOWED_TAG_KEYS", "").split(",") if value.strip()}
         )
     )
+    allowed_interface_types = tuple(
+        sorted(
+            {
+                value.strip()
+                for value in env.get("ALLOWED_ENI_INTERFACE_TYPES", "").split(",")
+                if value.strip()
+            }
+        )
+    )
     return OwnershipValidator(
         state,
         factory,
         allowed_tag_keys=allowed_tags,
+        allowed_interface_types=allowed_interface_types,
+        required_tag_key=env.get("REQUIRED_TARGET_TAG_KEY") or None,
+        required_tag_value=env.get("REQUIRED_TARGET_TAG_VALUE") or None,
     )

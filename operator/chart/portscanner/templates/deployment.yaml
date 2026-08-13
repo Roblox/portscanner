@@ -1,6 +1,6 @@
 {{/*
-Copyright 2026 Roblox Corporation
-SPDX-License-Identifier: Apache-2.0
+SPDX-FileCopyrightText: 2026 Portscanner contributors
+SPDX-License-Identifier: MIT
 */}}
 {{- $scannerNodeSelector := list -}}
 {{- range $key, $value := .Values.scanner.nodeSelector -}}

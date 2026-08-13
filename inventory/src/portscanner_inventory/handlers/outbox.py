@@ -27,7 +27,6 @@ _PAYLOAD_HASH_METADATA = "payload-sha256"
 _CONFLICT_CODES = {"ConditionalRequestConflict", "PreconditionFailed"}
 _OUTBOX_INDEX_NAME = "entity-event-index"
 _DELIVERED_ENTITY = "outbox-delivered"
-_LEGACY_DELIVERY_TTL_SECONDS = 604_800
 
 
 def _attribute(image: Mapping[str, Any], name: str) -> str | None:
@@ -46,8 +45,6 @@ def _number_attribute(image: Mapping[str, Any], name: str) -> int | None:
 
 
 def _delivery_retention_seconds(image: Mapping[str, Any]) -> int:
-    if "delivery_ttl_seconds" not in image:
-        return _LEGACY_DELIVERY_TTL_SECONDS
     retention_seconds = _number_attribute(image, "delivery_ttl_seconds")
     if retention_seconds is None or not 86_400 <= retention_seconds <= 31_536_000:
         raise ValueError("outbox delivery retention is invalid")
@@ -234,9 +231,7 @@ def dispatch_record(
     if not isinstance(image, Mapping) or _attribute(image, "entity") != "outbox":
         return False
     if dynamodb_client is not None:
-        # Validate delivery-tracking identity before any S3/SQS side effect. Legacy
-        # pending rows did not carry delivery_ttl_seconds and use the original
-        # seven-day retention when finalized.
+        # Validate delivery-tracking identity before any S3/SQS side effect.
         pk = _attribute(image, "pk")
         sk = _attribute(image, "sk")
         if not pk or not sk:

@@ -59,6 +59,7 @@ def eni(
     group_ids: tuple[str, ...] = (SG_ID,),
     status: str = "in-use",
     instance_id: str = "i-bbbbbbbb",
+    interface_type: str = "interface",
     tags: list[dict[str, str]] | None = None,
     secondary: list[tuple[str, str]] | None = None,
 ) -> dict[str, Any]:
@@ -88,6 +89,7 @@ def eni(
         "PrivateIpAddress": private_ip,
         "PrivateIpAddresses": private_values,
         "Status": status,
+        "InterfaceType": interface_type,
         "Attachment": {
             "AttachmentId": "eni-attach-eeeeeeee",
             "Status": "attached",

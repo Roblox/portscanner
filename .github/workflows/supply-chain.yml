@@ -28,7 +28,7 @@ jobs:
           python-version: "3.12"
 
       - name: Run sanitizer unit tests
-        run: python -m unittest discover -s tools/tests -p 'test_*.py' -v
+        run: python -m unittest -v tools.tests.test_sanitize
 
       - name: Scan tracked publication content
         run: python tools/sanitize.py

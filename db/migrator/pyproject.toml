@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "portscanner-migrator"
-version = "0.1.0"
+version = "1.0.0"
 description = "Transactional PostgreSQL migrator for the ACT data plane"
 requires-python = ">=3.12"
 license = "MIT"

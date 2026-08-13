@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "portscanner-inventory"
-version = "0.1.0"
+version = "1.0.0"
 description = "AWS public-IPv4 inventory and change discovery"
 requires-python = ">=3.12"
 license = "MIT"
@@ -15,7 +15,7 @@ classifiers = [
 dependencies = [
   "awslambdaric>=4,<5",
   "boto3>=1.35",
-  "portscanner-contracts>=0.1.0",
+  "portscanner-contracts>=1.0.0",
 ]
 
 [project.optional-dependencies]

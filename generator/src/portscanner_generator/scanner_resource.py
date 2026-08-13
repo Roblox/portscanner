@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
@@ -89,21 +89,10 @@ def _port_range(value: Any) -> tuple[int, int]:
     return start, end
 
 
-def _port_selection(
-    event: Any,
-    fallback_ports: Sequence[int] | None,
-) -> tuple[list[int], list[dict[str, int]]]:
+def _port_selection(event: Any) -> tuple[list[int], list[dict[str, int]]]:
     contract_ranges = getattr(event.scan, "tcp_port_ranges", None)
     if contract_ranges is None:
-        if fallback_ports is None:
-            raise ValueError("scan directive has no explicit TCP ports")
-        fallback_selection = sorted(set(fallback_ports))
-        if any(
-            isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535
-            for port in fallback_selection
-        ):
-            raise ValueError("ports must contain TCP port numbers")
-        return fallback_selection, []
+        raise ValueError("scan directive has no explicit TCP ports")
 
     ports: list[int] = []
     ranges: list[dict[str, int]] = []
@@ -122,7 +111,6 @@ def build_scanner_resource(
     event: Any,
     *,
     namespace: str,
-    ports: Sequence[int] | None = None,
     api_group: str = SCANNER_API_GROUP,
     api_version: str = SCANNER_API_VERSION,
 ) -> dict[str, Any]:
@@ -132,10 +120,7 @@ def build_scanner_resource(
     if isinstance(target, (list, tuple, set, frozenset)):
         raise ValueError("a TargetEvent must contain exactly one target")
     target_id = _required_text(target.target_id, "target.target_id")
-    address_value = getattr(target, "public_address", None)
-    if address_value is None:
-        address_value = getattr(target, "address", None)
-    address = _required_text(address_value, "target.public_address")
+    address = _required_text(getattr(target, "public_address", None), "target.public_address")
     provider_value = getattr(target, "provider", None)
     provider = _required_text(
         getattr(provider_value, "value", provider_value),
@@ -162,7 +147,7 @@ def build_scanner_resource(
     profile = _required_text(event.scan.profile, "scan.profile")
     if reason not in REASON_STATUS:
         raise ValueError("scan.reason has no readable status mapping")
-    explicit_ports, explicit_ranges = _port_selection(event, ports)
+    explicit_ports, explicit_ranges = _port_selection(event)
     priority = event.scan.priority
     if isinstance(priority, bool) or not isinstance(priority, int):
         raise ValueError("scan.priority must be an integer")

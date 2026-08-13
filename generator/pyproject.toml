@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "portscanner-generator"
-version = "0.1.0"
+version = "1.0.0"
 description = "Freshness-gated TargetEvent dispatcher for Scanner resources"
 requires-python = ">=3.12"
 license = "MIT"
@@ -16,8 +16,8 @@ dependencies = [
   "awslambdaric>=4,<5",
   "boto3>=1.35",
   "kubernetes",
-  "portscanner-contracts>=0.1.0",
-  "portscanner-inventory>=0.1.0",
+  "portscanner-contracts>=1.0.0",
+  "portscanner-inventory>=1.0.0",
 ]
 
 [project.optional-dependencies]

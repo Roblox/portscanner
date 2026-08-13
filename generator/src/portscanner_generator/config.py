@@ -21,6 +21,7 @@ _GROUP_RE = re.compile(
 _TABLE_RE = re.compile(r"^[A-Za-z0-9_.-]{3,255}$")
 _CLUSTER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,99}$")
 _ATTRIBUTE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,254}$")
+_ACCOUNT_RE = re.compile(r"^[0-9]{12}$")
 _REGION_RE = re.compile(r"^[a-z]{2}(?:-[a-z0-9]+)+-\d+$")
 
 
@@ -79,6 +80,17 @@ def _cidrs(environment: Mapping[str, str], name: str) -> tuple[IPv4Network, ...]
     return tuple(sorted(networks, key=lambda item: (int(item.network_address), item.prefixlen)))
 
 
+def _accounts(environment: Mapping[str, str]) -> tuple[str, ...]:
+    values = {
+        value.strip()
+        for value in environment.get("AUTHORIZED_ACCOUNT_IDS", "").split(",")
+        if value.strip()
+    }
+    if any(not _ACCOUNT_RE.fullmatch(value) for value in values):
+        raise ConfigurationError("AUTHORIZED_ACCOUNT_IDS must contain 12-digit account IDs")
+    return tuple(sorted(values))
+
+
 @dataclass(frozen=True)
 class GeneratorConfig:
     """Complete, validated deployment configuration."""
@@ -99,6 +111,7 @@ class GeneratorConfig:
     max_event_bytes: int = 65_536
     allowed_target_cidrs: tuple[IPv4Network, ...] = ()
     denied_target_cidrs: tuple[IPv4Network, ...] = ()
+    authorized_account_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         bucket = self.event_bucket.strip()
@@ -160,6 +173,8 @@ class GeneratorConfig:
                 for network in networks
             ):
                 raise ConfigurationError(f"{name} must contain canonical IPv4 networks")
+        if any(not _ACCOUNT_RE.fullmatch(value) for value in self.authorized_account_ids):
+            raise ConfigurationError("AUTHORIZED_ACCOUNT_IDS must contain 12-digit account IDs")
 
     def target_allowed(self, address: str) -> bool:
         try:
@@ -172,6 +187,9 @@ class GeneratorConfig:
             parsed in network for network in self.allowed_target_cidrs
         )
 
+    def account_allowed(self, account_id: str) -> bool:
+        return account_id in self.authorized_account_ids
+
     @classmethod
     def from_environment(
         cls,
@@ -179,15 +197,9 @@ class GeneratorConfig:
     ) -> GeneratorConfig:
         env = environment if environment is not None else os.environ
         return cls(
-            event_bucket=_aliased(env, "TARGET_EVENT_BUCKET", "S3_BUCKET") or "",
-            event_prefix=_aliased(env, "TARGET_EVENT_PREFIX", "S3_PREFIX") or "",
-            table_name=_aliased(
-                env,
-                "IDEMPOTENCY_TABLE",
-                "DYNAMODB_TABLE",
-                "DISPATCH_TABLE_NAME",
-            )
-            or "",
+            event_bucket=_aliased(env, "TARGET_EVENT_BUCKET") or "",
+            event_prefix=_aliased(env, "TARGET_EVENT_PREFIX") or "",
+            table_name=_aliased(env, "IDEMPOTENCY_TABLE") or "",
             cluster_name=_aliased(env, "EKS_CLUSTER_NAME") or "",
             namespace=_aliased(env, "K8S_NAMESPACE") or "",
             aws_region=_aliased(
@@ -199,7 +211,6 @@ class GeneratorConfig:
             api_group=_aliased(
                 env,
                 "K8S_API_GROUP",
-                "K8S_CRD_GROUP",
                 required=False,
             )
             or SCANNER_API_GROUP,
@@ -208,7 +219,6 @@ class GeneratorConfig:
             inventory_table_name=_aliased(
                 env,
                 "INVENTORY_TABLE",
-                "TARGET_TABLE_NAME",
                 required=False,
             ),
             partition_key=env.get(
@@ -224,4 +234,5 @@ class GeneratorConfig:
             max_event_bytes=_positive_int(env, "MAX_EVENT_BYTES", 65_536),
             allowed_target_cidrs=_cidrs(env, "ALLOWED_TARGET_CIDRS"),
             denied_target_cidrs=_cidrs(env, "DENIED_TARGET_CIDRS"),
+            authorized_account_ids=_accounts(env),
         )

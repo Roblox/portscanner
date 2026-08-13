@@ -116,6 +116,7 @@ class Repository:
         event: TargetEvent,
         *,
         finding_bucket: str | None = None,
+        queue_finding_handoffs: bool = True,
     ) -> bool:
         """Apply one inventory event; return False for an already-seen event."""
         addresses = _target_addresses(event)
@@ -300,23 +301,26 @@ class Repository:
                     or open_findings < 0
                 ):
                     raise DataInvariantError("open finding count query returned an invalid count")
-                if open_findings and not finding_bucket:
+                if open_findings and queue_finding_handoffs and not finding_bucket:
                     raise DataInvariantError(
                         "finding bucket is required to publish removal transitions"
                     )
                 self._close_for_ownership_removal(
                     event,
                     finding_bucket=finding_bucket,
+                    queue_finding_handoffs=queue_finding_handoffs,
                 )
             elif accepted and generation_gap_reactivation:
                 self._close_for_generation_gap_reactivation(
                     event,
                     finding_bucket=finding_bucket,
+                    queue_finding_handoffs=queue_finding_handoffs,
                 )
             elif accepted and address_binding_changed:
                 self._close_for_address_binding_change(
                     event,
                     finding_bucket=finding_bucket,
+                    queue_finding_handoffs=queue_finding_handoffs,
                 )
         return True
 
@@ -331,8 +335,9 @@ class Repository:
         envelope_sha256: str,
         raw_result_version: str | None,
         enrichment_result_version: str | None,
-        finding_bucket: str,
+        finding_bucket: str | None,
         xml_completion_validated: bool,
+        queue_finding_handoffs: bool = True,
     ) -> IngestResult:
         handoff_keys: list[str] = []
         with self.connection.transaction():
@@ -629,6 +634,7 @@ class Repository:
                         occurred_at=envelope.scan_completed_at,
                         finding_bucket=finding_bucket,
                         transition_types=transition_types,
+                        queue_event_handoffs=queue_finding_handoffs,
                     )
                 )
 
@@ -1154,7 +1160,7 @@ class Repository:
         source_key: str,
         source_attempt_id: str | None,
         occurred_at: datetime,
-        finding_bucket: str,
+        finding_bucket: str | None,
         transition_types: Mapping[tuple[str, int], str] | None = None,
         queue_event_handoffs: bool = True,
     ) -> list[str]:
@@ -1319,10 +1325,12 @@ class Repository:
         source_key: str,
         source_attempt_id: str | None,
         occurred_at: datetime,
-        finding_bucket: str,
+        finding_bucket: str | None,
         exposure_transition: str | None,
         queue_event_handoff: bool,
     ) -> str | None:
+        if queue_event_handoff and not finding_bucket:
+            raise DataInvariantError("finding bucket is required when handoff export is enabled")
         fingerprint = finding_fingerprint(
             rule["rule_key"],
             exposure["target_id"],
@@ -1524,7 +1532,7 @@ class Repository:
             event_key=event_key,
             fingerprint=fingerprint,
             source_attempt_id=source_attempt_id,
-            finding_bucket=finding_bucket,
+            finding_bucket=finding_bucket or "",
         )
 
     def _resolve_finding(
@@ -1537,9 +1545,11 @@ class Repository:
         source_key: str,
         source_attempt_id: str | None,
         occurred_at: datetime,
-        finding_bucket: str,
+        finding_bucket: str | None,
         queue_event_handoff: bool,
     ) -> str | None:
+        if queue_event_handoff and not finding_bucket:
+            raise DataInvariantError("finding bucket is required when handoff export is enabled")
         if finding["status"] != "open":
             return None
         fingerprint = finding["fingerprint"].strip()
@@ -1605,7 +1615,7 @@ class Repository:
             event_key=event_key,
             fingerprint=fingerprint,
             source_attempt_id=source_attempt_id,
-            finding_bucket=finding_bucket,
+            finding_bucket=finding_bucket or "",
         )
 
     def _insert_finding_event(
@@ -1821,6 +1831,7 @@ class Repository:
         event: TargetEvent,
         *,
         finding_bucket: str | None,
+        queue_finding_handoffs: bool,
     ) -> None:
         keys = {
             (row["protocol"], row["port"])
@@ -1848,7 +1859,7 @@ class Repository:
         )
         if not keys:
             return
-        if not finding_bucket:
+        if queue_finding_handoffs and not finding_bucket:
             raise DataInvariantError(
                 "finding bucket is required to publish generation-gap transitions"
             )
@@ -1873,6 +1884,7 @@ class Repository:
             occurred_at=event.source_observed_at,
             finding_bucket=finding_bucket,
             transition_types=dict.fromkeys(keys, "closed"),
+            queue_event_handoffs=queue_finding_handoffs,
         )
 
     def _close_for_address_binding_change(
@@ -1880,6 +1892,7 @@ class Repository:
         event: TargetEvent,
         *,
         finding_bucket: str | None,
+        queue_finding_handoffs: bool,
     ) -> None:
         current_addresses = {parse_address(address) for address in event.addresses}
         keys = {
@@ -1910,7 +1923,7 @@ class Repository:
         )
         if not keys:
             return
-        if not finding_bucket:
+        if queue_finding_handoffs and not finding_bucket:
             raise DataInvariantError(
                 "finding bucket is required to publish address-binding transitions"
             )
@@ -1938,6 +1951,7 @@ class Repository:
             occurred_at=event.source_observed_at,
             finding_bucket=finding_bucket,
             transition_types=transitions,
+            queue_event_handoffs=queue_finding_handoffs,
         )
 
     def _close_for_ownership_removal(
@@ -1945,6 +1959,7 @@ class Repository:
         event: TargetEvent,
         *,
         finding_bucket: str | None,
+        queue_finding_handoffs: bool,
     ) -> None:
         keys = {
             (row["protocol"], row["port"])
@@ -1989,16 +2004,20 @@ class Repository:
                 source_key=event.event_id,
                 source_attempt_id=None,
                 occurred_at=event.removed_at or event.source_observed_at,
-                finding_bucket=finding_bucket or "",
+                finding_bucket=finding_bucket,
                 transition_types=dict.fromkeys(keys, "closed"),
+                queue_event_handoffs=queue_finding_handoffs,
             )
 
     def reconcile_all(
         self,
         invocation_key: str,
         *,
-        finding_bucket: str,
+        finding_bucket: str | None,
+        queue_finding_handoffs: bool = True,
     ) -> ReconciliationResult:
+        if queue_finding_handoffs and not finding_bucket:
+            raise DataInvariantError("finding bucket is required when handoff export is enabled")
         run_key = stable_hash("act-reconciliation-v1", invocation_key)
         with self.connection.transaction():
             run = self.connection.execute(
@@ -2014,7 +2033,11 @@ class Repository:
                 return ReconciliationResult(
                     duplicate=True,
                     findings_examined=run["findings_examined"],
-                    handoff_keys=tuple(self._pending_handoff_keys(run_key=run_key)),
+                    handoff_keys=(
+                        tuple(self._pending_handoff_keys(run_key=run_key))
+                        if queue_finding_handoffs
+                        else ()
+                    ),
                 )
             if run is None:
                 self.connection.execute(
@@ -2049,20 +2072,22 @@ class Repository:
                         source_attempt_id=None,
                         occurred_at=now,
                         finding_bucket=finding_bucket,
+                        queue_event_handoffs=queue_finding_handoffs,
                     )
                 )
 
-            current = self.connection.execute(
-                "SELECT * FROM act.current_findings ORDER BY fingerprint"
-            ).fetchall()
-            queued.extend(
-                self._queue_current_snapshot(
-                    finding["fingerprint"].strip(),
-                    run_key=run_key,
-                    finding_bucket=finding_bucket,
+            if queue_finding_handoffs:
+                current = self.connection.execute(
+                    "SELECT * FROM act.current_findings ORDER BY fingerprint"
+                ).fetchall()
+                queued.extend(
+                    self._queue_current_snapshot(
+                        finding["fingerprint"].strip(),
+                        run_key=run_key,
+                        finding_bucket=finding_bucket or "",
+                    )
+                    for finding in current
                 )
-                for finding in current
-            )
             self.connection.execute(
                 """
                 UPDATE act.reconciliation_runs

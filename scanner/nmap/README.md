@@ -80,9 +80,7 @@ Supply these as CLI fields or their named environment variables:
 - `--s3-prefix` / `RESULTS_PREFIX`
 
 Equivalent `PORTSCANNER_*` environment names are accepted for operator
-integration. The optional compatibility fields `--scan-mode` and
-`--service-detection` are validated against the selected profile; they cannot
-enable a different or unbounded scan behavior.
+integration.
 
 `deadline-at` is generator dispatch metadata and does not stop an already
 dispatched scan. `not-after` is the absolute execution cutoff. Before each Nmap
@@ -129,6 +127,8 @@ portscanner-verify \
   --target-resource-id '<contract-resource>' \
   --target-private-address '<private-ipv4>' \
   --target-generation 1 \
+  --deadline-at '2030-01-01T00:05:00Z' \
+  --not-after '2030-01-01T00:30:00Z' \
   --image-version 'sha256:<64-lowercase-hex-characters>' \
   --s3-bucket '<configured-results-bucket>' \
   --s3-prefix verify-results
@@ -183,9 +183,8 @@ the container runtime sends `SIGKILL`.
 
 Consumers must treat the envelope as the authoritative source for event,
 trace, run, attempt, target-generation, profile, and coverage fields. The
-included parser validates the shared `ScanResultEnvelope` and nested
-`ScanResult`, verifies the XML SHA-256, checks target/coverage consistency, and
-ignores correlation-like XML attributes.
+deployed parser Lambda validates the shared `ScanResultEnvelope`, nested
+`ScanResult`, XML SHA-256, and target/coverage consistency.
 
 ## Container runtime
 

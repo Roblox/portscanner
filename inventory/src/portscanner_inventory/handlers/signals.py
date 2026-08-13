@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from typing import Any
 
@@ -60,6 +60,8 @@ def process_signal(
     dedupe_seconds: int,
     max_port_ranges: int = 32,
     max_ports: int = 8_192,
+    authorized_account_ids: Sequence[str] = (),
+    target_allowed: Callable[[str], bool] | None = None,
 ) -> dict[str, Any]:
     hint = parse_signal(
         event,
@@ -68,14 +70,26 @@ def process_signal(
     )
     if hint is None:
         return {"status": "ignored", "events": 0}
-    if not state.claim_signal(hint.event_id, now=now, ttl_seconds=dedupe_seconds):
-        return {"status": "duplicate", "events": 0}
+    if authorized_account_ids and hint.account_id not in authorized_account_ids:
+        raise ValueError("signal account is outside the configured authorized account scope")
+    if target_allowed is not None and any(
+        not target_allowed(address) for address in hint.public_ips
+    ):
+        raise ValueError("signal address is outside the configured CIDR scope")
 
+    claimed = False
     try:
-        prior_candidates = state.find_signal_candidates(hint)
         resolution = resolver.resolve(hint)
         if resolution.status is ResolutionStatus.UNKNOWN:
             raise SignalResolutionError("EC2 signal resolution is unknown")
+        if target_allowed is not None and any(
+            not target_allowed(target.public_ip) for target in resolution.targets
+        ):
+            raise ValueError("resolved signal target is outside the configured CIDR scope")
+        if not state.claim_signal(hint.event_id, now=now, ttl_seconds=dedupe_seconds):
+            return {"status": "duplicate", "events": 0}
+        claimed = True
+        prior_candidates = state.find_signal_candidates(hint)
 
         changed = 0
         resolved_ids: set[str] = set()
@@ -94,6 +108,8 @@ def process_signal(
 
         source = _hint_source(hint, now)
         for candidate in prior_candidates:
+            if target_allowed is not None and not target_allowed(candidate.target.public_ip):
+                continue
             if candidate.target_id in resolved_ids:
                 continue
             check = ownership.validate(candidate.target_id, candidate.generation)
@@ -126,7 +142,8 @@ def process_signal(
             "targets": len(resolution.targets),
         }
     except Exception:
-        state.release_signal(hint.event_id)
+        if claimed:
+            state.release_signal(hint.event_id)
         raise
 
 
@@ -134,7 +151,7 @@ class _Runtime:
     def __init__(self, settings: Settings) -> None:
         import boto3
 
-        settings.validate_state()
+        settings.validate_signals()
         session = boto3.Session()
         state = DynamoStateStore(
             session.client("dynamodb"),
@@ -152,11 +169,18 @@ class _Runtime:
         self.resolver = Ec2Resolver(
             factory,
             allowed_tag_keys=settings.allowed_tag_keys,
+            allowed_interface_types=settings.allowed_eni_interface_types,
+            required_tag_key=settings.required_target_tag_key,
+            required_tag_value=settings.required_target_tag_value,
+            max_pages=settings.snapshot_max_pages,
         )
         self.ownership = OwnershipValidator(
             state,
             factory,
             allowed_tag_keys=settings.allowed_tag_keys,
+            allowed_interface_types=settings.allowed_eni_interface_types,
+            required_tag_key=settings.required_target_tag_key,
+            required_tag_value=settings.required_target_tag_value,
         )
 
     def process(self, event: Mapping[str, Any]) -> dict[str, Any]:
@@ -169,6 +193,8 @@ class _Runtime:
             dedupe_seconds=self.settings.signal_dedupe_seconds,
             max_port_ranges=self.settings.max_signal_port_ranges,
             max_ports=self.settings.max_signal_ports,
+            authorized_account_ids=self.settings.authorized_account_ids,
+            target_allowed=self.settings.target_allowed,
         )
 
 

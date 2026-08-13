@@ -225,9 +225,14 @@ def build_target_event(
         not_after = collected_at + COVERAGE_EXECUTION_WINDOW
         event_type = TargetEventType.RESCAN_REQUESTED
     elif reason in {ScanReason.NEW_TARGET, ScanReason.MANUAL}:
-        candidate = CandidatePorts.full()
-        ranges = (FULL_TCP_PORT_RANGE,)
-        profile = ScanProfile.FAST_FULL_TCP
+        managed_targeted = (
+            reason is ScanReason.NEW_TARGET
+            and current.managed_canary
+            and not current.candidate_ports.full_tcp
+        )
+        candidate = current.candidate_ports if managed_targeted else CandidatePorts.full()
+        ranges = _ranges(candidate)
+        profile = ScanProfile.TARGETED_TCP if managed_targeted else ScanProfile.FAST_FULL_TCP
         priority = 500 if reason is ScanReason.MANUAL else 100
         deadline = collected_at + (
             MANUAL_DISPATCH_WINDOW if reason is ScanReason.MANUAL else PRIORITY_DISPATCH_WINDOW

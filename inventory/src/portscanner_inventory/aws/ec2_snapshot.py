@@ -34,18 +34,29 @@ class Ec2SnapshotBackend:
         account_id: str,
         region: str,
         allowed_tag_keys: Sequence[str] = (),
+        allowed_interface_types: Sequence[str] = (),
+        required_tag_key: str | None = None,
+        required_tag_value: str | None = None,
         page_size: int = 500,
+        max_pages: int = 1000,
     ) -> None:
         self._client = client
         self._scope = SnapshotScope(source="ec2", account_id=account_id, region=region)
         self._allowed_tag_keys = tuple(allowed_tag_keys)
+        self._allowed_interface_types = tuple(allowed_interface_types)
+        self._required_tag_key = required_tag_key
+        self._required_tag_value = required_tag_value
         self._page_size = page_size
+        self._max_pages = max_pages
         if not 5 <= page_size <= 1000:
             raise ValueError("EC2 page size must be within 5..1000")
+        if not 1 <= max_pages <= 10_000:
+            raise ValueError("EC2 max_pages must be within 1..10000")
 
     def _fetch(self, operation: str, result_key: str) -> _PageResult:
         values: list[Mapping[str, Any]] = []
         token: str | None = None
+        seen_tokens: set[str] = set()
         pages = 0
         while True:
             request: dict[str, Any] = {"MaxResults": self._page_size}
@@ -62,7 +73,13 @@ class Ec2SnapshotBackend:
             next_token = response.get("NextToken")
             if not next_token:
                 return _PageResult(tuple(values), pages)
-            token = str(next_token)
+            next_value = str(next_token)
+            if next_value in seen_tokens:
+                return _PageResult(tuple(values), pages, "pagination-token-repeated")
+            if pages >= self._max_pages:
+                return _PageResult(tuple(values), pages, "pagination-page-limit")
+            seen_tokens.add(next_value)
+            token = next_value
 
     def collect(self) -> SnapshotBatch:
         group_fetch = self._fetch("describe_security_groups", "SecurityGroups")
@@ -110,6 +127,9 @@ class Ec2SnapshotBackend:
                     security_groups=security_groups,
                     allowed_tag_keys=self._allowed_tag_keys,
                     instance_state=instance_states.get(instance_id or ""),
+                    allowed_interface_types=self._allowed_interface_types,
+                    required_tag_key=self._required_tag_key,
+                    required_tag_value=self._required_tag_value,
                 ):
                     normalized[target.target_id] = target
             except (KeyError, TypeError, ValueError):

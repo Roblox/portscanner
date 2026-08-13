@@ -78,7 +78,7 @@ ROOT="$(CDPATH= cd -- "${ROOT_CANDIDATE}" && pwd -P)"
 
 case "${ROOT}" in
   "${AWS_DIR}/application" | \
-    "${AWS_DIR}/examples/created-vpc" | \
+    "${AWS_DIR}/deployment" | \
     "${AWS_DIR}/examples/existing-vpc" | \
     "${AWS_DIR}/examples/multi-account-central")
     ;;
@@ -86,7 +86,7 @@ case "${ROOT}" in
     die "member-account is not a central image deployment root"
     ;;
   *)
-    die "Terraform root must be application, created-vpc, existing-vpc, or multi-account-central"
+    die "Terraform root must be application, deployment, existing-vpc, or multi-account-central"
     ;;
 esac
 [[ -f "${ROOT}/main.tf" ]] || die "${ROOT} is not a Terraform root with main.tf"
@@ -150,7 +150,7 @@ CONTEXTS=(
   .
   .
   .
-  operator
+  .
   .
 )
 
@@ -199,18 +199,50 @@ if ! jq -e --argjson expected "${EXPECTED_COMPONENTS_JSON}" \
 fi
 if ! jq -e '
   type == "object"
-  and keys == ["automatic_inventory_enabled", "canary_mode", "dispatch_enabled", "migration_run", "operator_installed", "runtime_created"]
+  and keys == [
+    "automatic_inventory_enabled",
+    "canary_mode",
+    "dispatch_enabled",
+    "finding_export_enabled",
+    "managed_canary_enabled",
+    "migration_run",
+    "operator_installed",
+    "periodic_coverage_enabled",
+    "periodic_snapshots_enabled",
+    "processor_reconciliation_enabled",
+    "runtime_created",
+    "signal_hints_enabled"
+  ]
   and all(.[]; type == "boolean")
   and ((.migration_run == false) or .runtime_created)
   and ((.operator_installed == false) or .migration_run)
   and ((.dispatch_enabled == false) or .operator_installed)
   and ((.automatic_inventory_enabled == false) or .dispatch_enabled)
-  and ((.canary_mode == false) or (.operator_installed and (.automatic_inventory_enabled == false)))
+  and ((.periodic_snapshots_enabled == false) or .dispatch_enabled)
+  and ((.periodic_coverage_enabled == false) or .dispatch_enabled)
+  and ((.signal_hints_enabled == false) or .dispatch_enabled)
+  and ((.processor_reconciliation_enabled == false) or (.runtime_created and .migration_run))
+  and (
+    (.canary_mode == false) or (
+      .operator_installed
+      and (.automatic_inventory_enabled == false)
+      and (.periodic_snapshots_enabled == false)
+      and (.periodic_coverage_enabled == false)
+      and (.signal_hints_enabled == false)
+      and (.processor_reconciliation_enabled == false)
+    )
+  )
 ' <<<"${DEPLOYMENT_STATE_JSON}" >/dev/null; then
   die "deployment_state is malformed or violates staged deployment ordering"
 fi
 DEPLOYMENT_STAGE="$(jq -r '
-  if .automatic_inventory_enabled then "active"
+  if (
+    .automatic_inventory_enabled or
+    .periodic_snapshots_enabled or
+    .periodic_coverage_enabled or
+    .signal_hints_enabled or
+    .processor_reconciliation_enabled
+  ) then "active"
   elif (.canary_mode and .dispatch_enabled) then "canary"
   elif .canary_mode then "canary-paused"
   elif .dispatch_enabled then "dispatch-only"

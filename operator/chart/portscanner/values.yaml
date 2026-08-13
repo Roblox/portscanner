@@ -1,5 +1,5 @@
-# Copyright 2026 Roblox Corporation
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: 2026 Portscanner contributors
+# SPDX-License-Identifier: MIT
 
 nameOverride: ""
 fullnameOverride: ""
@@ -67,11 +67,6 @@ scanner:
     create: true
     name: ""
     annotations: {}
-    automountServiceAccountToken: false
-  rbac:
-    create: true
-    # Scanner Jobs need no Kubernetes permissions by default.
-    rules: []
   authorization:
     # Optional deployment policy. Empty allowedCidrs leaves account/ownership
     # authorization as the scope gate; scanner-enforced denies still apply first.

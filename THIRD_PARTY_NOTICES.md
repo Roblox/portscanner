@@ -47,7 +47,7 @@ this notice.
   <https://github.com/boto/botocore>
 - Upstream licensing files:
   <https://github.com/boto/boto3/blob/develop/LICENSE> and
-  <https://github.com/boto/botocore/blob/develop/LICENSE>
+  <https://github.com/boto/botocore/blob/develop/LICENSE.txt>
 
 ### Kubernetes Python client
 
@@ -65,7 +65,22 @@ this notice.
 
 - Project: <https://github.com/psycopg/psycopg>
 - Upstream licensing information:
-  <https://github.com/psycopg/psycopg/tree/master/LICENSE.txt>
+  <https://github.com/psycopg/psycopg/blob/master/LICENSE.txt>
+
+## Go operator
+
+The statically linked operator includes Kubernetes API machinery, client-go,
+controller-runtime, and `golang.org/x` modules. Their exact resolved versions
+are recorded in `operator/go.sum`.
+
+- Kubernetes projects: <https://github.com/kubernetes/kubernetes>,
+  <https://github.com/kubernetes/client-go>, and
+  <https://github.com/kubernetes-sigs/controller-runtime>
+- Kubernetes and controller-runtime license:
+  <https://www.apache.org/licenses/LICENSE-2.0>
+- Bundled license text: `LICENSES/Apache-2.0.txt`
+- Go supplemental repositories and licenses:
+  <https://pkg.go.dev/golang.org/x>
 
 ## Build, test, and repository tooling
 

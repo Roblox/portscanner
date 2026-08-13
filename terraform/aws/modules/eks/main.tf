@@ -314,9 +314,14 @@ data "aws_ec2_instance_type" "node" {
 }
 
 locals {
-  api_client_security_group_ids = setunion(
-    toset([var.generator_security_group_id]),
-    var.additional_api_client_security_group_ids
+  api_client_security_groups = merge(
+    {
+      generator = var.generator_security_group_id
+    },
+    {
+      for security_group_id in var.additional_api_client_security_group_ids :
+      "additional-${security_group_id}" => security_group_id
+    }
   )
 }
 
@@ -482,7 +487,7 @@ resource "aws_eks_cluster" "this" {
 }
 
 resource "aws_vpc_security_group_ingress_rule" "api_client" {
-  for_each = local.api_client_security_group_ids
+  for_each = local.api_client_security_groups
 
   security_group_id            = aws_eks_cluster.this.vpc_config[0].cluster_security_group_id
   referenced_security_group_id = each.value

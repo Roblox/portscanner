@@ -1,101 +1,13 @@
 from __future__ import annotations
 
 import json
-import sys
-import types
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-import pytest
-from act_parser.contracts import (
-    ContractValidationError,
-    parse_target_event,
-    validate_finding,
-    validate_scan_result,
-)
+from act_parser.contracts import validate_scan_result
 from act_parser.database import Repository
 from act_parser.models import ScanEnvelope
-
-
-def test_uses_shared_validator_without_local_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
-    called: list[dict[str, object]] = []
-    module = types.ModuleType("portscanner_contracts")
-
-    def validator(payload: dict[str, object]) -> dict[str, object]:
-        called.append(payload)
-        return {**payload, "validated": True}
-
-    module.validate_scan_result = validator  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "portscanner_contracts", module)
-
-    payload = {"schema_version": "1.0"}
-    assert validate_scan_result(payload)["validated"] is True
-    assert called == [payload]
-
-
-def test_rejects_non_mapping_model_dump(monkeypatch: pytest.MonkeyPatch) -> None:
-    module = types.ModuleType("portscanner_contracts")
-
-    class InvalidModel:
-        def model_dump(self, *, mode: str) -> list[str]:
-            assert mode == "json"
-            return []
-
-    def validator(_payload: dict[str, object]) -> InvalidModel:
-        return InvalidModel()
-
-    module.validate_scan_result = validator  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "portscanner_contracts", module)
-
-    with pytest.raises(ContractValidationError, match="unsupported value"):
-        validate_scan_result({})
-
-
-def test_wraps_shared_contract_rejection(monkeypatch: pytest.MonkeyPatch) -> None:
-    module = types.ModuleType("portscanner_contracts")
-
-    def validator(_payload: dict[str, object]) -> None:
-        raise ValueError("invalid")
-
-    module.validate_scan_result = validator  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "portscanner_contracts", module)
-
-    with pytest.raises(ContractValidationError):
-        validate_scan_result({})
-
-
-def test_finding_adapter_uses_public_validator(monkeypatch: pytest.MonkeyPatch) -> None:
-    called: list[dict[str, object]] = []
-    module = types.ModuleType("portscanner_contracts")
-
-    def validator(payload: dict[str, object]) -> dict[str, object]:
-        called.append(payload)
-        return {**payload, "validated": True}
-
-    module.validate_finding = validator  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "portscanner_contracts", module)
-
-    payload = {"schema_version": "1.0"}
-    assert validate_finding(payload)["validated"] is True
-    assert called == [payload]
-
-
-def test_target_event_uses_shared_parser(monkeypatch: pytest.MonkeyPatch) -> None:
-    module = types.ModuleType("portscanner_contracts")
-    parsed = object()
-    calls: list[dict[str, object]] = []
-
-    def parser(payload: dict[str, object]) -> object:
-        calls.append(payload)
-        return parsed
-
-    module.parse_target_event = parser  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "portscanner_contracts", module)
-    payload = {"event_type": "target.upsert"}
-
-    assert parse_target_event(payload) is parsed
-    assert calls == [payload]
 
 
 def test_accepts_authoritative_typed_scanner_envelope() -> None:

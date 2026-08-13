@@ -9,7 +9,6 @@ from act_parser.models import CoverageDeclaration, ScanEnvelope, port_spec_bound
     [
         ("22", (22, 22)),
         ("1-65535", (1, 65535)),
-        ("nmap-default", (None, None)),
     ],
 )
 def test_port_spec_bounds(spec: str, expected: tuple[int | None, int | None]) -> None:
@@ -20,13 +19,6 @@ def test_port_spec_bounds(spec: str, expected: tuple[int | None, int | None]) ->
 def test_invalid_port_specs_are_rejected(spec: str) -> None:
     with pytest.raises(ValueError):
         port_spec_bounds(spec)
-
-
-def test_symbolic_coverage_cannot_close_by_absence() -> None:
-    declaration = CoverageDeclaration.from_mapping(
-        {"protocol": "tcp", "ports": ["nmap-default"], "complete": True}
-    )[0]
-    assert not declaration.contains("tcp", 22)
 
 
 def test_incomplete_numeric_coverage_cannot_close_by_absence() -> None:
