@@ -5,74 +5,80 @@ SPDX-License-Identifier: MIT
 
 # Portscanner
 
-Portscanner is a self-hosted system for continuously verifying the
-Internet-facing ports of cloud assets you are authorized to test. It discovers
-current AWS ownership, dispatches bounded Nmap Jobs in Kubernetes, and stores
-generation-safe exposures and findings in PostgreSQL.
+Cloud exposure changes in minutes. A public IP appears, a security group
+changes, or a service opens—often long before the next scheduled scanner
+sweep. Event streams are fast but incomplete; snapshots are complete but
+slower.
+
+Portscanner uses both. It continuously discovers Internet-facing cloud assets,
+moves new and changed doors to the front of the line, verifies current
+ownership immediately before scanning, and turns outside-in evidence into
+durable findings.
+
+For the story behind the design, watch
+[Minutes from Malice](https://tinyurl.com/minutes-from-malice).
 
 > Only scan assets you own or are explicitly authorized to test. The AWS
-> evaluation creates EKS, Aurora, NAT, EC2, queues, buckets, and supporting
-> services that incur charges. Only the managed-canary evaluation briefly
-> enables dispatch; account inventory stays paused until you activate it.
+> deployment creates services that incur charges. Account inventory stays
+> paused until you define target scope and activate it.
 
-## Architecture at a glance
+## How it works
 
-The solid path is the default one-target evaluation; dashed paths require
-explicit opt-in. Snapshots are authoritative and change signals only trigger a
-current-state reread. For the design motivation, watch
-[Minutes from Malice](https://tinyurl.com/minutes-from-malice).
+1. **Discover** authoritative cloud inventory.
+2. **Prioritize** new and changed targets without starving the baseline sweep.
+3. **Verify** current ownership, then run a bounded Nmap Job from outside.
+4. **Act** on complete evidence; failed or partial work remains `UNKNOWN`.
 
 ```mermaid
 flowchart LR
-    canary["Default EC2 canary: TCP 18080"]
-    accounts["Opt-in AWS accounts and change hints"]
-    inventory["Inventory Lambdas and DynamoDB outbox"]
-    generator["Generator and ownership revalidation"]
-    operator["EKS operator"]
-    scanner["Bounded Nmap Job"]
-    projector["Target projector"]
-    results["Result in S3 and SQS"]
-    parser["Parser Lambda"]
-    database["Aurora PostgreSQL"]
-    export["Opt-in finding export"]
+    targets["Authorized cloud targets"]
+    snapshots["Snapshot integrations"]
+    signals["Change signals"]
+    consumers["Finding consumers"]
 
-    canary -->|"Scoped EC2 snapshot"| inventory
-    accounts -.-> inventory
-    inventory -->|"TargetEvent in S3 and SQS"| generator
-    generator --> operator
-    operator --> scanner
-    scanner -->|"TCP connect through NAT"| canary
-    inventory --> projector
-    scanner --> results
-    projector --> database
-    results --> parser
+    subgraph suite [Full suite deployed by Terraform]
+        inventory["Inventory and outbox"]
+        generator["Priority and ownership gate"]
+        scanner["EKS operator and Nmap Jobs"]
+        parser["Projection and result parsing"]
+        database["Aurora findings"]
+    end
+
+    targets --> snapshots
+    snapshots --> inventory
+    signals -.-> inventory
+    inventory --> generator
+    generator --> scanner
+    scanner -->|"TCP connect"| targets
+    inventory --> parser
+    scanner --> parser
     parser --> database
-    database -.-> export
+    database -.-> consumers
 ```
 
-## Try it locally
+## What you get
 
-Local checks do not scan a network target. Install Python 3.12, `uv`, Go, and
-Docker, then run:
+Terraform deploys the complete self-hosted suite—not just a scanner:
 
-```sh
-make sync
-make check
-```
+- VPC, NAT, EKS, Aurora PostgreSQL, ECR, KMS, Secrets Manager, logs, alarms,
+  and encrypted Terraform state.
+- Inventory, snapshot, signal, outbox, generator, parser, projector, processor,
+  and migration Lambdas.
+- A namespace-scoped Helm operator, bounded Nmap Jobs, quotas, rate limits, and
+  immutable result storage.
+- Generation-safe target, exposure, and finding state with optional S3/SQS
+  export.
 
-`make ci` adds PostgreSQL, Go/envtest, Terraform, Helm, and publication checks.
-Contributions must use synthetic fixtures, preserve authorization and
-`UNKNOWN` semantics, commit generated outputs, and pass `make ci`. New source
-adapters must follow [inventory/README.md](inventory/README.md).
+AWS Config, CloudTrail hints, multi-account roles, and finding export are
+created only when you enable those integrations.
 
-## Evaluate the AWS stack
+## Getting started
 
-The canonical evaluation creates its own low-cost VPC and a small isolated EC2
-canary that exposes only TCP 18080 to the scanner's NAT address. It never scans
-localhost, an arbitrary public host, or the rest of your account.
+Use a dedicated AWS sandbox and standard AWS CLI credentials. The bootstrap
+script checks the exact Terraform, Docker, Trivy, `jq`, Python, Git, and `tar`
+requirements.
 
-Install the versions checked by the bootstrap script, configure the standard
-AWS CLI credential chain, and copy the environment template:
+Copy the single environment file:
 
 ```sh
 cp terraform/aws/deployment/environment.auto.tfvars.json.example \
@@ -80,77 +86,74 @@ cp terraform/aws/deployment/environment.auto.tfvars.json.example \
 $EDITOR terraform/aws/deployment/environment.auto.tfvars.json
 ```
 
-The JSON file is the only user-maintained deployment configuration. It contains
-non-secret account, Region, access, capacity, retention, and integration
-policy; credentials stay outside Terraform variables.
-
-Deploy and evaluate:
+Deploy the full suite and run the quickstart:
 
 ```sh
 ./terraform/aws/scripts/bootstrap.sh
 ./terraform/aws/scripts/deploy.sh evaluate
 ```
 
-Bootstrap verifies the live AWS identity, creates remote state, applies a
-paused foundation, and builds, scans, and publishes immutable images.
-Evaluation migrates PostgreSQL, installs the Helm operator, runs one targeted
-canary scan, verifies its finding, and returns dispatch to paused state.
-Each saved Terraform plan still requires an explicit confirmation.
+Bootstrap creates remote state, deploys the paused foundation, and builds,
+scans, and publishes immutable images. The quickstart installs the runtime,
+migrates PostgreSQL, scans an isolated one-port target, verifies the resulting
+finding, and returns dispatch to paused state.
 
-Read [terraform/aws/README.md](terraform/aws/README.md) before applying. It
-covers exact prerequisites, costs, failure recovery, emergency pause, data
-retention, and guarded destruction.
+Each apply displays and requires confirmation of an exact saved plan. See the
+[AWS deployment README](terraform/aws/README.md) for prerequisites, costs,
+recovery, retention, and destruction.
 
-## Next steps
+## Bring your targets and cloud signals
 
-After the canary succeeds:
+After the quickstart succeeds, edit the same environment JSON:
 
-1. Add explicit AWS account, CIDR, ENI class, and opt-in tag scope to the same
-   environment JSON.
-2. Enable periodic snapshots, review the plan, and activate the integration.
-3. Optionally add Config/CloudTrail hints, multi-account collection, or S3/SQS
-   finding export; retire the managed canary when it is no longer needed.
+1. **Targets:** add authorized account IDs, public CIDRs, ENI classes, and
+   opt-in tags.
+2. **Snapshots:** use direct EC2 snapshots for the simplest AWS setup, or
+   connect an AWS Config aggregator. Snapshots remain authoritative.
+3. **Change signals:** enable native EventBridge state changes and optional
+   CloudTrail API hints. Signals trigger a current-state reread; they never
+   prove ownership by themselves.
+4. **Findings:** keep PostgreSQL as the boundary, or enable immutable S3/SQS
+   export for downstream consumers.
+
+Then review and activate:
 
 ```sh
 ./terraform/aws/scripts/deploy.sh activate
 ./terraform/aws/scripts/deploy.sh pause
 ```
 
-Activation is never implied by installation. Signals only accelerate work;
-authoritative snapshots and immediate provider ownership rereads remain the
-scan gate.
+To add another cloud, implement its snapshot, signal-resolution, and ownership
+interfaces described in [inventory/README.md](inventory/README.md). The
+scanner and findings pipeline stay unchanged.
 
-## Safety model
+## Safety and scope
 
-Inventory records stable target generations, and the generator rereads current
-provider ownership immediately before creating a digest-pinned Scanner Job.
-Explicit account, CIDR, profile, rate, Pod, and Job limits bound dispatch;
-failed or incomplete evidence remains `UNKNOWN` and never silently closes an
-exposure.
+Account, CIDR, profile, rate, Pod, and Job limits bound dispatch. Portscanner
+rereads provider ownership immediately before creating a scan. Stale,
+ambiguous, failed, or incomplete evidence never silently closes an exposure.
 
-## Supported scope
+Version 1.0 supports self-hosted AWS, public IPv4 EC2 targets, TCP connect
+scanning, Kubernetes orchestration, and PostgreSQL findings. It does not
+authorize Internet-wide scanning, support private/IPv6 targets, provide
+production-ready GCP/Azure adapters, or perform automatic remediation.
 
-The 1.0 release supports self-hosted AWS, public IPv4 EC2 targets, TCP
-connect scanning, Kubernetes orchestration, and PostgreSQL findings. It does
-not authorize Internet-wide scanning, support private/IPv6 targets, provide
-production-ready GCP/Azure adapters, remediate resources, or promise a
-universal detection-time SLO.
+## Develop locally
 
-## Components
+Local checks never scan a target:
 
-- [Terraform AWS deployment](terraform/aws/README.md)
-- [Inventory and source adapters](inventory/README.md)
-- [Contracts and finding consumers](contracts/README.md)
-- [Generator](generator/README.md)
-- [Kubernetes operator](operator/README.md)
-- [Nmap scanner](scanner/nmap/README.md)
-- [Database migrator](db/migrator/README.md)
+```sh
+make sync
+make check
+```
 
-Synthetic contracts are in `examples/`; generated JSON Schemas are in
-`schemas/`.
+`make ci` adds PostgreSQL, Go/envtest, Terraform, Helm, and publication checks.
 
-## Project policy
+Implementation details live beside the code: [Terraform](terraform/aws/README.md),
+[inventory](inventory/README.md), [contracts](contracts/README.md),
+[generator](generator/README.md), [operator](operator/README.md),
+[scanner](scanner/nmap/README.md), and [database migrator](db/migrator/README.md).
 
-Portscanner is MIT licensed. Report vulnerabilities privately through
+Portscanner is MIT licensed. Report vulnerabilities through
 [SECURITY.md](SECURITY.md), and review
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) for bundled dependencies.
